@@ -14,6 +14,11 @@ class AgentApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
+        # --- Paths ---
+        self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.data_dir = os.path.join(self.base_dir, "data")
+        os.makedirs(self.data_dir, exist_ok=True)
+
         # --- Settings ---
         self.max_context_window = 8192
         self.compression_threshold = self.max_context_window // 2
@@ -29,7 +34,7 @@ class AgentApp(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        self.memory = AgentMemory(db_path="agent_data")
+        self.memory = AgentMemory(db_path=os.path.join(self.data_dir, "agent_data"))
         self.llm = LlamaForgeClient()
 
         self._build_gui()
@@ -44,11 +49,14 @@ class AgentApp(ctk.CTk):
 
     def _load_system_prompt(self):
         base_prompt = "You are a helpful, smart local AI assistant. You have access to vector memory to recall past events.\n"
-        if os.path.exists("SOUL.md"):
-            with open("SOUL.md", "r", encoding="utf-8") as f:
+        soul_path = os.path.join(self.data_dir, "SOUL.md")
+        user_path = os.path.join(self.data_dir, "USER.md")
+        
+        if os.path.exists(soul_path):
+            with open(soul_path, "r", encoding="utf-8") as f:
                 base_prompt += f"\n--- AI PERSONA (SOUL) ---\n{f.read()}\n"
-        if os.path.exists("USER.md"):
-            with open("USER.md", "r", encoding="utf-8") as f:
+        if os.path.exists(user_path):
+            with open(user_path, "r", encoding="utf-8") as f:
                 base_prompt += f"\n--- USER CONTEXT (USER) ---\n{f.read()}\n"
         return base_prompt
 
@@ -111,6 +119,9 @@ class AgentApp(ctk.CTk):
 
         self.send_button = ctk.CTkButton(self.input_frame, text="Send", width=80, command=self.send_message)
         self.send_button.grid(row=0, column=2)
+
+        self.scroll_bottom_btn = ctk.CTkButton(self.input_frame, text="↓ Bottom", width=60, command=self.scroll_to_bottom)
+        self.scroll_bottom_btn.grid(row=0, column=3, padx=(10, 0))
 
         self.image_preview_label = ctk.CTkLabel(self.input_frame, text="", text_color="green")
         self.image_preview_label.grid(row=1, column=1, sticky="w", pady=(5,0))
@@ -216,14 +227,15 @@ class AgentApp(ctk.CTk):
             filetypes=(("Image files", "*.jpg *.jpeg *.png *.bmp *.gif"), ("All files", "*.*"))
         )
         if filepath:
-            os.makedirs("artifacts", exist_ok=True)
+            artifacts_dir = os.path.join(self.data_dir, "artifacts")
+            os.makedirs(artifacts_dir, exist_ok=True)
             filename = os.path.basename(filepath)
-            dest = os.path.join("artifacts", filename)
+            dest = os.path.join(artifacts_dir, filename)
             # Avoid overwriting if same name
             base, ext = os.path.splitext(filename)
             counter = 1
             while os.path.exists(dest):
-                dest = os.path.join("artifacts", f"{base}_{counter}{ext}")
+                dest = os.path.join(artifacts_dir, f"{base}_{counter}{ext}")
                 counter += 1
                 
             shutil.copy(filepath, dest)
@@ -249,14 +261,28 @@ class AgentApp(ctk.CTk):
             self.chat_display.insert("end", f"[Image Error: {e}]")
         self.chat_display.configure(state="disabled")
 
+    def scroll_to_bottom(self):
+        self.chat_display.see("end")
+
     def append_to_display(self, text, tag=None):
+        textbox = self.chat_display._textbox
+        textbox.update_idletasks()
+        
+        # Check if we are currently near the bottom of the textbox to determine if we should auto-scroll
+        yview = textbox.yview()
+        is_at_bottom = True
+        if len(yview) == 2:
+            is_at_bottom = (yview[1] >= 0.98) or (textbox.bbox("end-1c") is not None)
+            
         self.chat_display.configure(state="normal")
         if tag:
             self.chat_display.insert("end", text, tag)
         else:
             self.chat_display.insert("end", text)
         self.chat_display.configure(state="disabled")
-        self.chat_display.see("end")
+        
+        if is_at_bottom:
+            self.chat_display.see("end")
 
     def _sanitize_messages(self, msgs):
         out = []
@@ -319,15 +345,16 @@ class AgentApp(ctk.CTk):
 
             # Vector embed the text part
             user_emb = self.llm.get_embedding(user_text)
+            query_context = list(self.working_context)
             if user_emb:
                 self.memory.add_to_vector_memory(user_text, {"id": user_msg_id, "role": "user"}, user_emb)
                 relevant_past = self.memory.search_vector_memory(user_emb, n_results=2)
-                query_context = list(self.working_context)
-                if relevant_past:
+                if relevant_past and len(query_context) > 0 and query_context[0]["role"] == "system":
                     memory_string = "\n".join(relevant_past)
-                    query_context.insert(-1, {"role": "system", "content": f"Relevant past memories:\n{memory_string}"})
-            else:
-                query_context = self.working_context
+                    # Safely append to the initial system prompt without mutating the persistent working_context
+                    sys_msg = dict(query_context[0])
+                    sys_msg["content"] += f"\n\n[Relevant past memories for this query:\n{memory_string}]"
+                    query_context[0] = sys_msg
 
             self.manage_context()
 
