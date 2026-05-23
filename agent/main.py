@@ -342,7 +342,9 @@ class AgentApp(ctk.CTk):
         yview = textbox.yview()
         is_at_bottom = True
         if len(yview) == 2:
-            is_at_bottom = (yview[1] >= 0.98) or (textbox.bbox("end-1c") is not None)
+            # yview[1] represents the percentage of the document currently visible at the bottom of the screen.
+            # Using 0.9999 because in long chats, even 0.99 could be multiple pages up!
+            is_at_bottom = (yview[1] >= 0.9999) or (textbox.bbox("end-1c") is not None)
             
         self.chat_display.configure(state="normal")
         if tag:
@@ -383,15 +385,14 @@ class AgentApp(ctk.CTk):
         self.chat_display.configure(state="normal")
         self.chat_display._textbox.window_create("end", window=btn)
         self.chat_display.insert("end", "\n")
-        self.chat_display.tag_config(b_id, foreground="#6E6E6E", elide=not state, 
-                                     font=ctk.CTkFont(slant="italic", size=self.chat_font_size))
+        self.chat_display.tag_config(b_id, elide=not state)
         self.chat_display.configure(state="disabled")
 
     def _ui_append_reasoning(self, b_id, text):
-        self.append_to_display(text, tag=b_id)
+        self.append_to_display(text, tag=(b_id, "reasoning"))
 
     def _ui_end_reasoning_block(self, b_id):
-        self.append_to_display("\n\n", tag=b_id)
+        self.append_to_display("\n\n", tag=(b_id, "reasoning"))
 
     def _sanitize_messages(self, msgs):
         out = []
@@ -459,9 +460,10 @@ class AgentApp(ctk.CTk):
                 # Search for past memories BEFORE adding the current message to avoid echoing the prompt
                 relevant_past = self.memory.search_vector_memory(user_emb, n_results=5)
                 
-                # Now add the current message to the memory
-                self.memory.add_to_vector_memory(user_text, {"id": user_msg_id, "role": "user"}, user_emb)
-                self.after(0, self.update_memory_count_display)
+                # Now add the current message to the memory if it's long enough
+                if len(user_text.split()) > 3:
+                    self.memory.add_to_vector_memory(user_text, {"id": user_msg_id, "role": "user"}, user_emb)
+                    self.after(0, self.update_memory_count_display)
                 
                 if relevant_past and len(query_context) > 0 and query_context[0]["role"] == "system":
                     memory_string = "\n".join(relevant_past)
