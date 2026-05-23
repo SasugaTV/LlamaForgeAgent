@@ -4,6 +4,7 @@ import os
 import shutil
 import base64
 import tkinter as tk
+import re
 from tkinter import filedialog, simpledialog, messagebox
 from PIL import Image, ImageTk
 
@@ -27,6 +28,13 @@ class AgentApp(ctk.CTk):
         self.working_context = []
         self.attached_image_path = None
         self.inline_images = [] # Prevent garbage collection
+        self.chat_font_size = 14
+        
+        # Reasoning UI state
+        self.reasoning_states = {}
+        self.reasoning_buttons = {}
+        self.reasoning_counter = 0
+        self.global_show_thinking = ctk.BooleanVar(value=True)
 
         # --- Initialization ---
         self.title("LlamaForge Agent")
@@ -46,6 +54,12 @@ class AgentApp(ctk.CTk):
             self.load_conversation(convos[0]["id"])
         else:
             self.new_conversation()
+            
+        self.update_memory_count_display()
+
+    def update_memory_count_display(self):
+        count = self.memory.get_total_memories()
+        self.memory_count_label.configure(text=f"Memories: {count}")
 
     def _load_system_prompt(self):
         base_prompt = "You are a helpful, smart local AI assistant. You have access to vector memory to recall past events.\n"
@@ -78,6 +92,9 @@ class AgentApp(ctk.CTk):
         self.conv_list_frame = ctk.CTkScrollableFrame(self.sidebar_frame, fg_color="transparent")
         self.conv_list_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
 
+        self.memory_count_label = ctk.CTkLabel(self.sidebar_frame, text="Memories: 0", font=ctk.CTkFont(size=12, slant="italic"), text_color="gray50")
+        self.memory_count_label.grid(row=3, column=0, pady=(0, 10))
+
         # --- Main Area ---
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.main_frame.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
@@ -100,10 +117,21 @@ class AgentApp(ctk.CTk):
         self.rename_btn = ctk.CTkButton(self.action_frame, text="Rename", width=60, command=self.rename_current_conversation)
         self.rename_btn.pack(side="right", padx=5)
 
+        self.thinking_switch = ctk.CTkSwitch(self.action_frame, text="Show Thinking", variable=self.global_show_thinking, command=self.toggle_all_thinking)
+        self.thinking_switch.pack(side="right", padx=10)
+
+        self.zoom_out_btn = ctk.CTkButton(self.action_frame, text="A-", width=40, command=self.decrease_font_size)
+        self.zoom_out_btn.pack(side="right", padx=5)
+
+        self.zoom_in_btn = ctk.CTkButton(self.action_frame, text="A+", width=40, command=self.increase_font_size)
+        self.zoom_in_btn.pack(side="right", padx=5)
+
         # Chat display
-        self.chat_display = ctk.CTkTextbox(self.main_frame, state="disabled", wrap="word", font=("Segoe UI", 14))
+        self.chat_display = ctk.CTkTextbox(self.main_frame, state="disabled", wrap="word", font=("Segoe UI", self.chat_font_size))
         self.chat_display.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
         self.chat_display.tag_config("reasoning", foreground="#6E6E6E")
+        self.chat_display.tag_config("user_text", foreground="#5Dadec")
+        self.chat_display.tag_config("agent_text", foreground="#48C774")
 
         # Input area
         self.input_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
@@ -113,7 +141,7 @@ class AgentApp(ctk.CTk):
         self.attach_btn = ctk.CTkButton(self.input_frame, text="📎 Image", width=60, command=self.attach_image)
         self.attach_btn.grid(row=0, column=0, padx=(0, 10))
 
-        self.entry = ctk.CTkEntry(self.input_frame, placeholder_text="Type your message here...", font=("Segoe UI", 14))
+        self.entry = ctk.CTkEntry(self.input_frame, placeholder_text="Type your message here...", font=("Segoe UI", self.chat_font_size))
         self.entry.grid(row=0, column=1, sticky="ew", padx=(0, 10))
         self.entry.bind("<Return>", lambda event: self.send_message())
 
@@ -156,6 +184,10 @@ class AgentApp(ctk.CTk):
         self.working_context = [{"role": "system", "content": self.system_prompt}]
         self.inline_images.clear()
         
+        self.reasoning_states.clear()
+        self.reasoning_buttons.clear()
+        self.reasoning_counter = 0
+        
         # Update title
         convos = self.memory.get_conversations()
         name = next((c["name"] for c in convos if c["id"] == conv_id), "Chat")
@@ -178,8 +210,11 @@ class AgentApp(ctk.CTk):
             text_content = msg["content"]
             img_path = msg.get("image_path")
             
+            tag = "user_text" if role == "user" else "agent_text"
+            role_label = "You" if role == "user" else "Agent"
+            
             if img_path and os.path.exists(img_path):
-                self.append_to_display(f"{role.capitalize()}: ")
+                self.append_to_display(f"{role_label}: ", tag)
                 self.insert_image_to_display(img_path)
                 self.append_to_display(f"\n{text_content}\n\n")
                 
@@ -192,8 +227,22 @@ class AgentApp(ctk.CTk):
                 ]
                 self.working_context.append({"role": role, "content": content_arr})
             else:
-                self.append_to_display(f"{role.capitalize()}: {text_content}\n\n")
-                self.working_context.append({"role": role, "content": text_content})
+                self.append_to_display(f"{role_label}: ", tag)
+                
+                if role == "assistant":
+                    reasoning_match = re.match(r"^\s*<think>\n?(.*?)\n?</think>\s*(.*)$", text_content, flags=re.DOTALL)
+                    if reasoning_match:
+                        reasoning_text = reasoning_match.group(1).strip()
+                        text_content = reasoning_match.group(2).strip()
+                        
+                        self.reasoning_counter += 1
+                        b_id = f"reason_{self.reasoning_counter}"
+                        self._ui_start_reasoning_block(b_id)
+                        self._ui_append_reasoning(b_id, reasoning_text)
+                        self._ui_end_reasoning_block(b_id)
+
+                self.append_to_display(f"{text_content}\n\n")
+                self.working_context.append({"role": role, "content": msg["content"]})
                 
     def rename_current_conversation(self):
         if not self.current_conversation_id: return
@@ -261,6 +310,27 @@ class AgentApp(ctk.CTk):
             self.chat_display.insert("end", f"[Image Error: {e}]")
         self.chat_display.configure(state="disabled")
 
+    def increase_font_size(self):
+        if self.chat_font_size < 40:
+            self.chat_font_size += 2
+            self._update_fonts()
+
+    def decrease_font_size(self):
+        if self.chat_font_size > 8:
+            self.chat_font_size -= 2
+            self._update_fonts()
+
+    def _update_fonts(self):
+        new_font = ctk.CTkFont(family="Segoe UI", size=self.chat_font_size)
+        self.chat_display.configure(font=new_font)
+        self.entry.configure(font=new_font)
+
+    def _on_mousewheel_zoom(self, event):
+        if event.delta > 0:
+            self.increase_font_size()
+        else:
+            self.decrease_font_size()
+
     def scroll_to_bottom(self):
         self.chat_display.see("end")
 
@@ -283,6 +353,45 @@ class AgentApp(ctk.CTk):
         
         if is_at_bottom:
             self.chat_display.see("end")
+
+    def toggle_all_thinking(self):
+        state = self.global_show_thinking.get()
+        for b_id in self.reasoning_states:
+            self.reasoning_states[b_id] = state
+            self.chat_display.tag_config(b_id, elide=not state)
+            if b_id in self.reasoning_buttons and self.reasoning_buttons[b_id].winfo_exists():
+                self.reasoning_buttons[b_id].configure(text="▼ Thinking" if state else "▶ Thinking")
+
+    def toggle_single_reasoning(self, b_id):
+        state = not self.reasoning_states.get(b_id, True)
+        self.reasoning_states[b_id] = state
+        self.chat_display.tag_config(b_id, elide=not state)
+        if b_id in self.reasoning_buttons and self.reasoning_buttons[b_id].winfo_exists():
+            self.reasoning_buttons[b_id].configure(text="▼ Thinking" if state else "▶ Thinking")
+
+    def _ui_start_reasoning_block(self, b_id):
+        state = self.global_show_thinking.get()
+        self.reasoning_states[b_id] = state
+        
+        btn = ctk.CTkButton(self.chat_display, text="▼ Thinking" if state else "▶ Thinking", 
+                            width=80, height=20, fg_color="transparent", 
+                            text_color="#6E6E6E", hover_color="#333333", anchor="w",
+                            font=ctk.CTkFont(size=self.chat_font_size, slant="italic"), 
+                            command=lambda id=b_id: self.toggle_single_reasoning(id))
+        self.reasoning_buttons[b_id] = btn
+        
+        self.chat_display.configure(state="normal")
+        self.chat_display._textbox.window_create("end", window=btn)
+        self.chat_display.insert("end", "\n")
+        self.chat_display.tag_config(b_id, foreground="#6E6E6E", elide=not state, 
+                                     font=ctk.CTkFont(slant="italic", size=self.chat_font_size))
+        self.chat_display.configure(state="disabled")
+
+    def _ui_append_reasoning(self, b_id, text):
+        self.append_to_display(text, tag=b_id)
+
+    def _ui_end_reasoning_block(self, b_id):
+        self.append_to_display("\n\n", tag=b_id)
 
     def _sanitize_messages(self, msgs):
         out = []
@@ -321,7 +430,7 @@ class AgentApp(ctk.CTk):
 
     def process_message(self, user_text, img_path):
         try:
-            self.after(0, lambda: self.append_to_display("You: "))
+            self.after(0, lambda: self.append_to_display("You: ", "user_text"))
             
             if img_path:
                 self.after(0, lambda p=img_path: self.insert_image_to_display(p))
@@ -347,8 +456,13 @@ class AgentApp(ctk.CTk):
             user_emb = self.llm.get_embedding(user_text)
             query_context = list(self.working_context)
             if user_emb:
+                # Search for past memories BEFORE adding the current message to avoid echoing the prompt
+                relevant_past = self.memory.search_vector_memory(user_emb, n_results=5)
+                
+                # Now add the current message to the memory
                 self.memory.add_to_vector_memory(user_text, {"id": user_msg_id, "role": "user"}, user_emb)
-                relevant_past = self.memory.search_vector_memory(user_emb, n_results=2)
+                self.after(0, self.update_memory_count_display)
+                
                 if relevant_past and len(query_context) > 0 and query_context[0]["role"] == "system":
                     memory_string = "\n".join(relevant_past)
                     # Safely append to the initial system prompt without mutating the persistent working_context
@@ -359,7 +473,7 @@ class AgentApp(ctk.CTk):
             self.manage_context()
 
             def start_agent_msg():
-                self.append_to_display("Agent: ")
+                self.append_to_display("Agent: ", "agent_text")
                 
             self.after(0, start_agent_msg)
             
@@ -367,7 +481,10 @@ class AgentApp(ctk.CTk):
             response_stream = self.llm.get_chat_response(query_context, stream=True)
             
             full_response = ""
+            full_reasoning = ""
             in_reasoning = False
+            current_block_id = None
+            
             if response_stream:
                 for chunk in response_stream:
                     if not chunk.choices:
@@ -382,13 +499,18 @@ class AgentApp(ctk.CTk):
                     if reasoning:
                         if not in_reasoning:
                             in_reasoning = True
-                            self.after(0, lambda: self.append_to_display("[thinking] ", "reasoning"))
-                        self.after(0, lambda t=reasoning: self.append_to_display(t, "reasoning"))
+                            self.reasoning_counter += 1
+                            current_block_id = f"reason_{self.reasoning_counter}"
+                            self.after(0, lambda b=current_block_id: self._ui_start_reasoning_block(b))
+                            
+                        full_reasoning += reasoning
+                        self.after(0, lambda b=current_block_id, t=reasoning: self._ui_append_reasoning(b, t))
 
                     if content:
                         if in_reasoning:
                             in_reasoning = False
-                            self.after(0, lambda: self.append_to_display("\n\n"))
+                            self.after(0, lambda b=current_block_id: self._ui_end_reasoning_block(b))
+                            
                         full_response += content
                         self.after(0, lambda text=content: self.append_to_display(text))
             else:
@@ -396,12 +518,17 @@ class AgentApp(ctk.CTk):
                 
             self.after(0, lambda: self.append_to_display("\n\n"))
 
-            if full_response:
-                ai_msg_id = self.memory.add_message_to_sqlite(self.current_conversation_id, "assistant", full_response, None)
-                self.working_context.append({"role": "assistant", "content": full_response})
-                ai_emb = self.llm.get_embedding(full_response)
+            if full_response or full_reasoning:
+                db_content = full_response
+                if full_reasoning:
+                    db_content = f"<think>\n{full_reasoning}\n</think>\n{full_response}"
+                    
+                ai_msg_id = self.memory.add_message_to_sqlite(self.current_conversation_id, "assistant", db_content, None)
+                self.working_context.append({"role": "assistant", "content": db_content})
+                ai_emb = self.llm.get_embedding(db_content)
                 if ai_emb:
-                    self.memory.add_to_vector_memory(full_response, {"id": ai_msg_id, "role": "assistant"}, ai_emb)
+                    self.memory.add_to_vector_memory(db_content, {"id": ai_msg_id, "role": "assistant"}, ai_emb)
+                    self.after(0, self.update_memory_count_display)
 
         except Exception as e:
             error_msg = f"\n[CRITICAL THREAD ERROR]: {str(e)}\n\n"

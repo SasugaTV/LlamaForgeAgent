@@ -136,7 +136,7 @@ class AgentMemory:
             ids=[doc_id]
         )
 
-    def search_vector_memory(self, query_embedding, n_results=3):
+    def search_vector_memory(self, query_embedding, n_results=5):
         """Retrieve most relevant past conversation snippets based on vector similarity"""
         if self.collection.count() == 0:
             return []
@@ -146,6 +146,17 @@ class AgentMemory:
             n_results=n_results
         )
         
+        formatted_memories = []
         if results and results['documents'] and results['documents'][0]:
-            return results['documents'][0]
+            docs = results['documents'][0]
+            metas = results['metadatas'][0]
+            for i in range(len(docs)):
+                role = metas[i].get("role", "unknown").capitalize()
+                text = docs[i]
+                formatted_memories.append(f"{role} said: {text}")
+            return formatted_memories
         return []
+
+    def get_total_memories(self):
+        """Return the total number of items stored in the vector database."""
+        return self.collection.count()
