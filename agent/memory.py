@@ -4,6 +4,8 @@ import os
 import chromadb
 from chromadb.config import Settings
 
+MAX_MEMORY_SNIPPET_CHARS = 900
+
 class AgentMemory:
     def __init__(self, db_path="data"):
         os.makedirs(db_path, exist_ok=True)
@@ -136,6 +138,12 @@ class AgentMemory:
             ids=[doc_id]
         )
 
+    def _trim_memory_snippet(self, text):
+        text = " ".join(str(text or "").split())
+        if len(text) <= MAX_MEMORY_SNIPPET_CHARS:
+            return text
+        return text[:MAX_MEMORY_SNIPPET_CHARS].rstrip() + "..."
+
     def search_vector_memory(self, query_embedding, n_results=5):
         """Retrieve most relevant past conversation snippets based on vector similarity"""
         if self.collection.count() == 0:
@@ -152,7 +160,7 @@ class AgentMemory:
             metas = results['metadatas'][0]
             for i in range(len(docs)):
                 role = metas[i].get("role", "unknown").capitalize()
-                text = docs[i]
+                text = self._trim_memory_snippet(docs[i])
                 formatted_memories.append(f"{role} said: {text}")
             return formatted_memories
         return []

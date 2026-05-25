@@ -847,7 +847,7 @@ finally {
 
             # Vector embed the text part
             user_emb = self.llm.get_embedding(user_text)
-            query_context = list(self.working_context)
+            relevant_past = []
             if user_emb:
                 # Search for past memories BEFORE adding the current message to avoid echoing the prompt
                 relevant_past = self.memory.search_vector_memory(user_emb, n_results=5)
@@ -856,15 +856,16 @@ finally {
                 if len(user_text.split()) > 3:
                     self.memory.add_to_vector_memory(user_text, {"id": user_msg_id, "role": "user"}, user_emb)
                     self.after(0, self.update_memory_count_display)
-                
-                if relevant_past and len(query_context) > 0 and query_context[0]["role"] == "system":
-                    memory_string = "\n".join(relevant_past)
-                    # Safely append to the initial system prompt without mutating the persistent working_context
-                    sys_msg = dict(query_context[0])
-                    sys_msg["content"] += f"\n\n[Relevant past memories for this query:\n{memory_string}]"
-                    query_context[0] = sys_msg
 
             self.manage_context()
+            query_context = list(self.working_context)
+
+            if relevant_past and len(query_context) > 0 and query_context[0]["role"] == "system":
+                memory_string = "\n".join(relevant_past)
+                # Safely append to the initial system prompt without mutating the persistent working_context
+                sys_msg = dict(query_context[0])
+                sys_msg["content"] += f"\n\n[Relevant past memories for this query:\n{memory_string}]"
+                query_context[0] = sys_msg
 
             def start_agent_msg():
                 self.append_to_display("Agent: ", "agent_text")
