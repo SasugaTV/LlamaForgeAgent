@@ -6,6 +6,7 @@ import subprocess
 import base64
 import tkinter as tk
 import re
+from datetime import datetime
 from tkinter import filedialog, simpledialog, messagebox
 from PIL import Image, ImageTk
 
@@ -94,6 +95,44 @@ class AgentApp(ctk.CTk):
             with open(user_path, "r", encoding="utf-8") as f:
                 base_prompt += f"\n--- USER CONTEXT (USER) ---\n{f.read()}\n"
         return base_prompt
+
+    def _current_time_context(self):
+        now = datetime.now().astimezone()
+        return (
+            f"Current local date/time: {now.strftime('%Y-%m-%d %H:%M:%S %z')}. "
+            "Treat recalled memories as dated observations; time-sensitive memories may be stale, resolved, or superseded."
+        )
+
+    def _load_notepad_context(self):
+        notepad_path = os.path.join(self.data_dir, "NOTEPAD.md")
+        if not os.path.exists(notepad_path):
+            return ""
+        with open(notepad_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+
+    def _is_first_user_message(self):
+        return not any(message.get("role") == "user" for message in self.working_context)
+
+    def _build_first_turn_memory_context(self):
+        sections = []
+        notepad = self._load_notepad_context()
+        if notepad:
+            sections.append(f"Agent notepad:\n{notepad}")
+
+        recent_memories = self.memory.get_recent_memories(limit=6)
+        if recent_memories:
+            sections.append("Recent memories:\n" + "\n".join(recent_memories))
+
+        return "\n\n".join(sections)
+
+    def _append_query_system_context(self, query_context, title, content):
+        if not content or not query_context or query_context[0].get("role") != "system":
+            return query_context
+
+        sys_msg = dict(query_context[0])
+        sys_msg["content"] += f"\n\n[{title}:\n{content}]"
+        query_context[0] = sys_msg
+        return query_context
 
     def _build_gui(self):
         self.grid_columnconfigure(1, weight=1)
@@ -822,6 +861,11 @@ finally {
 
     def process_message(self, user_text, img_path):
         try:
+            is_first_user_message = self._is_first_user_message()
+            first_turn_memory_context = (
+                self._build_first_turn_memory_context() if is_first_user_message else ""
+            )
+
             self.after(0, self._start_llamaforge_request_status)
             self.after(0, lambda: self.append_to_display("You: ", "user_text"))
             
@@ -854,18 +898,31 @@ finally {
                 
                 # Now add the current message to the memory if it's long enough
                 if len(user_text.split()) > 3:
-                    self.memory.add_to_vector_memory(user_text, {"id": user_msg_id, "role": "user"}, user_emb)
+                    self.memory.add_to_vector_memory(
+                        user_text,
+                        {"id": user_msg_id, "role": "user", "memory_type": "message"},
+                        user_emb
+                    )
                     self.after(0, self.update_memory_count_display)
 
             self.manage_context()
             query_context = list(self.working_context)
 
-            if relevant_past and len(query_context) > 0 and query_context[0]["role"] == "system":
-                memory_string = "\n".join(relevant_past)
-                # Safely append to the initial system prompt without mutating the persistent working_context
-                sys_msg = dict(query_context[0])
-                sys_msg["content"] += f"\n\n[Relevant past memories for this query:\n{memory_string}]"
-                query_context[0] = sys_msg
+            query_context = self._append_query_system_context(
+                query_context,
+                "Current date and time",
+                self._current_time_context()
+            )
+            query_context = self._append_query_system_context(
+                query_context,
+                "Session startup memory",
+                first_turn_memory_context
+            )
+            query_context = self._append_query_system_context(
+                query_context,
+                "Relevant past memories for this query",
+                "\n".join(relevant_past)
+            )
 
             def start_agent_msg():
                 self.append_to_display("Agent: ", "agent_text")
@@ -978,7 +1035,11 @@ finally {
                 self.working_context.append({"role": "assistant", "content": db_content})
                 ai_emb = self.llm.get_embedding(db_content)
                 if ai_emb:
-                    self.memory.add_to_vector_memory(db_content, {"id": ai_msg_id, "role": "assistant"}, ai_emb)
+                    self.memory.add_to_vector_memory(
+                        db_content,
+                        {"id": ai_msg_id, "role": "assistant", "memory_type": "message"},
+                        ai_emb
+                    )
                     self.after(0, self.update_memory_count_display)
 
         except Exception as e:

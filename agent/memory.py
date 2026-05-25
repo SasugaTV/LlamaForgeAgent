@@ -1,10 +1,13 @@
 import sqlite3
 import json
 import os
+from datetime import datetime
+
 import chromadb
 from chromadb.config import Settings
 
 MAX_MEMORY_SNIPPET_CHARS = 900
+SQLITE_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 class AgentMemory:
     def __init__(self, db_path="data"):
@@ -120,6 +123,20 @@ class AgentMemory:
         self.conn.commit()
         return self.cursor.lastrowid
 
+    def get_message_metadata(self, message_id):
+        self.cursor.execute(
+            'SELECT conversation_id, role, timestamp FROM messages WHERE id = ?',
+            (message_id,)
+        )
+        row = self.cursor.fetchone()
+        if not row:
+            return {}
+        return {
+            "conversation_id": row[0],
+            "role": row[1],
+            "created_at": row[2],
+        }
+
     def get_all_messages(self, conversation_id):
         self.cursor.execute('SELECT role, content, image_path FROM messages WHERE conversation_id = ? ORDER BY id ASC', (conversation_id,))
         return [{"role": row[0], "content": row[1], "image_path": row[2]} for row in self.cursor.fetchall()]
@@ -128,8 +145,26 @@ class AgentMemory:
         self.cursor.execute('DELETE FROM messages WHERE conversation_id = ?', (conversation_id,))
         self.conn.commit()
 
+    def _current_timestamp(self):
+        return datetime.utcnow().strftime(SQLITE_TIMESTAMP_FORMAT)
+
+    def _prepare_vector_metadata(self, metadata):
+        metadata = dict(metadata or {})
+        message_id = metadata.get("message_id", metadata.get("id"))
+        if message_id is not None:
+            message_info = self.get_message_metadata(message_id)
+            metadata.setdefault("id", message_id)
+            metadata.setdefault("message_id", message_id)
+            metadata.setdefault("conversation_id", message_info.get("conversation_id"))
+            metadata.setdefault("role", message_info.get("role"))
+            metadata.setdefault("created_at", message_info.get("created_at"))
+
+        metadata.setdefault("created_at", self._current_timestamp())
+        return {key: value for key, value in metadata.items() if value is not None}
+
     def add_to_vector_memory(self, text, metadata, embedding):
         """Store an embedding and its text in ChromaDB"""
+        metadata = self._prepare_vector_metadata(metadata)
         doc_id = f"mem_{metadata.get('id', 'unknown')}_{hash(text)}"
         self.collection.add(
             embeddings=[embedding],
@@ -138,11 +173,79 @@ class AgentMemory:
             ids=[doc_id]
         )
 
+    def _parse_timestamp(self, timestamp):
+        if not timestamp:
+            return None
+        timestamp = str(timestamp).strip()
+        for parser in (
+            lambda value: datetime.fromisoformat(value.replace("Z", "+00:00")),
+            lambda value: datetime.strptime(value, SQLITE_TIMESTAMP_FORMAT),
+        ):
+            try:
+                parsed = parser(timestamp)
+                return parsed.replace(tzinfo=None)
+            except ValueError:
+                continue
+        return None
+
+    def _relative_age(self, timestamp):
+        parsed = self._parse_timestamp(timestamp)
+        if not parsed:
+            return "age unknown"
+
+        days = (datetime.utcnow() - parsed).days
+        if days < 0:
+            return "in the future"
+        if days == 0:
+            return "today"
+        if days == 1:
+            return "1 day ago"
+        if days < 31:
+            return f"{days} days ago"
+        if days < 365:
+            months = max(1, days // 30)
+            return "1 month ago" if months == 1 else f"{months} months ago"
+
+        years = max(1, days // 365)
+        return "1 year ago" if years == 1 else f"{years} years ago"
+
+    def _message_timestamp(self, metadata):
+        metadata = metadata or {}
+        timestamp = metadata.get("created_at") or metadata.get("timestamp")
+        if timestamp:
+            return timestamp
+
+        message_id = metadata.get("message_id", metadata.get("id"))
+        if message_id is None:
+            return None
+        return self.get_message_metadata(message_id).get("created_at")
+
+    def _format_memory_line(self, role, text, timestamp=None):
+        recorded = "Recorded at an unknown time"
+        if timestamp:
+            recorded = f"Recorded {str(timestamp)[:10]} ({self._relative_age(timestamp)})"
+        return f"{recorded}: {role.capitalize()} said: {self._trim_memory_snippet(text)}"
+
     def _trim_memory_snippet(self, text):
         text = " ".join(str(text or "").split())
         if len(text) <= MAX_MEMORY_SNIPPET_CHARS:
             return text
         return text[:MAX_MEMORY_SNIPPET_CHARS].rstrip() + "..."
+
+    def get_recent_memories(self, limit=6):
+        self.cursor.execute(
+            '''
+            SELECT role, content, timestamp
+            FROM messages
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+            ''',
+            (limit,)
+        )
+        return [
+            self._format_memory_line(role, content, timestamp)
+            for role, content, timestamp in self.cursor.fetchall()
+        ]
 
     def search_vector_memory(self, query_embedding, n_results=5):
         """Retrieve most relevant past conversation snippets based on vector similarity"""
@@ -160,8 +263,8 @@ class AgentMemory:
             metas = results['metadatas'][0]
             for i in range(len(docs)):
                 role = metas[i].get("role", "unknown").capitalize()
-                text = self._trim_memory_snippet(docs[i])
-                formatted_memories.append(f"{role} said: {text}")
+                timestamp = self._message_timestamp(metas[i])
+                formatted_memories.append(self._format_memory_line(role, docs[i], timestamp))
             return formatted_memories
         return []
 
