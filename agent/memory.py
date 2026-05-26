@@ -28,7 +28,7 @@ class AgentMemory:
         self.notes_collection = self.chroma_client.get_or_create_collection(name="agent_notes")
 
     def _init_sqlite(self):
-        self.cursor.execute('''
+        cursor = self.conn.execute('''
             CREATE TABLE IF NOT EXISTS conversations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT,
@@ -38,9 +38,9 @@ class AgentMemory:
         ''')
         
         # Check if messages table exists
-        self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'")
-        if not self.cursor.fetchone():
-            self.cursor.execute('''
+        cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'")
+        if not cursor.fetchone():
+            cursor = self.conn.execute('''
                 CREATE TABLE messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     conversation_id INTEGER,
@@ -53,13 +53,13 @@ class AgentMemory:
             ''')
             self.conn.commit()
         else:
-            self.cursor.execute("PRAGMA table_info(messages)")
-            columns = [info[1] for info in self.cursor.fetchall()]
+            cursor = self.conn.execute("PRAGMA table_info(messages)")
+            columns = [info[1] for info in cursor.fetchall()]
             
             if "conversation_id" not in columns:
                 # Need to migrate
-                self.cursor.execute('ALTER TABLE messages RENAME TO messages_old')
-                self.cursor.execute('''
+                cursor = self.conn.execute('ALTER TABLE messages RENAME TO messages_old')
+                cursor = self.conn.execute('''
                     CREATE TABLE messages (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         conversation_id INTEGER,
@@ -71,42 +71,42 @@ class AgentMemory:
                     )
                 ''')
                 # Create a default conversation
-                self.cursor.execute('INSERT INTO conversations (name) VALUES ("Default Chat")')
-                default_id = self.cursor.lastrowid
+                cursor = self.conn.execute('INSERT INTO conversations (name) VALUES ("Default Chat")')
+                default_id = cursor.lastrowid
                 
                 # Copy old data
-                self.cursor.execute('INSERT INTO messages (id, conversation_id, role, content, timestamp) SELECT id, ?, role, content, timestamp FROM messages_old', (default_id,))
-                self.cursor.execute('DROP TABLE messages_old')
+                cursor = self.conn.execute('INSERT INTO messages (id, conversation_id, role, content, timestamp) SELECT id, ?, role, content, timestamp FROM messages_old', (default_id,))
+                cursor = self.conn.execute('DROP TABLE messages_old')
             else:
                 if "image_path" not in columns:
-                    self.cursor.execute('ALTER TABLE messages ADD COLUMN image_path TEXT')
+                    cursor = self.conn.execute('ALTER TABLE messages ADD COLUMN image_path TEXT')
             self.conn.commit()
 
         # Ensure foreign keys are enabled
-        self.cursor.execute('PRAGMA foreign_keys = ON')
+        cursor = self.conn.execute('PRAGMA foreign_keys = ON')
 
     def get_conversations(self):
-        self.cursor.execute('SELECT id, name, created_at, updated_at FROM conversations ORDER BY updated_at DESC')
-        return [{"id": row[0], "name": row[1], "created_at": row[2], "updated_at": row[3]} for row in self.cursor.fetchall()]
+        cursor = self.conn.execute('SELECT id, name, created_at, updated_at FROM conversations ORDER BY updated_at DESC')
+        return [{"id": row[0], "name": row[1], "created_at": row[2], "updated_at": row[3]} for row in cursor.fetchall()]
 
     def create_conversation(self, name="New Chat"):
-        self.cursor.execute('INSERT INTO conversations (name) VALUES (?)', (name,))
+        cursor = self.conn.execute('INSERT INTO conversations (name) VALUES (?)', (name,))
         self.conn.commit()
-        return self.cursor.lastrowid
+        return cursor.lastrowid
 
     def rename_conversation(self, conversation_id, new_name):
-        self.cursor.execute('UPDATE conversations SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (new_name, conversation_id))
+        cursor = self.conn.execute('UPDATE conversations SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (new_name, conversation_id))
         self.conn.commit()
 
     def delete_conversation(self, conversation_id):
-        self.cursor.execute('DELETE FROM conversations WHERE id = ?', (conversation_id,))
+        cursor = self.conn.execute('DELETE FROM conversations WHERE id = ?', (conversation_id,))
         # Also delete messages since we might not have ON DELETE CASCADE if migrated weirdly or just to be safe
-        self.cursor.execute('DELETE FROM messages WHERE conversation_id = ?', (conversation_id,))
+        cursor = self.conn.execute('DELETE FROM messages WHERE conversation_id = ?', (conversation_id,))
         self.conn.commit()
 
     def fork_conversation(self, conversation_id, new_name=None):
-        self.cursor.execute('SELECT name FROM conversations WHERE id = ?', (conversation_id,))
-        row = self.cursor.fetchone()
+        cursor = self.conn.execute('SELECT name FROM conversations WHERE id = ?', (conversation_id,))
+        row = cursor.fetchone()
         if not row:
             return None
         orig_name = row[0]
@@ -114,25 +114,25 @@ class AgentMemory:
         
         new_id = self.create_conversation(fork_name)
         
-        self.cursor.execute('SELECT role, content, image_path, timestamp FROM messages WHERE conversation_id = ? ORDER BY id ASC', (conversation_id,))
-        messages = self.cursor.fetchall()
+        cursor = self.conn.execute('SELECT role, content, image_path, timestamp FROM messages WHERE conversation_id = ? ORDER BY id ASC', (conversation_id,))
+        messages = cursor.fetchall()
         for msg in messages:
-            self.cursor.execute('INSERT INTO messages (conversation_id, role, content, image_path, timestamp) VALUES (?, ?, ?, ?, ?)', (new_id, msg[0], msg[1], msg[2], msg[3]))
+            cursor = self.conn.execute('INSERT INTO messages (conversation_id, role, content, image_path, timestamp) VALUES (?, ?, ?, ?, ?)', (new_id, msg[0], msg[1], msg[2], msg[3]))
         self.conn.commit()
         return new_id
 
     def add_message_to_sqlite(self, conversation_id, role, content, image_path=None):
-        self.cursor.execute('INSERT INTO messages (conversation_id, role, content, image_path) VALUES (?, ?, ?, ?)', (conversation_id, role, content, image_path))
-        self.cursor.execute('UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', (conversation_id,))
+        cursor = self.conn.execute('INSERT INTO messages (conversation_id, role, content, image_path) VALUES (?, ?, ?, ?)', (conversation_id, role, content, image_path))
+        cursor = self.conn.execute('UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', (conversation_id,))
         self.conn.commit()
-        return self.cursor.lastrowid
+        return cursor.lastrowid
 
     def get_message_metadata(self, message_id):
-        self.cursor.execute(
+        cursor = self.conn.execute(
             'SELECT conversation_id, role, timestamp FROM messages WHERE id = ?',
             (message_id,)
         )
-        row = self.cursor.fetchone()
+        row = cursor.fetchone()
         if not row:
             return {}
         return {
@@ -142,11 +142,11 @@ class AgentMemory:
         }
 
     def get_all_messages(self, conversation_id):
-        self.cursor.execute('SELECT role, content, image_path FROM messages WHERE conversation_id = ? ORDER BY id ASC', (conversation_id,))
-        return [{"role": row[0], "content": row[1], "image_path": row[2]} for row in self.cursor.fetchall()]
+        cursor = self.conn.execute('SELECT role, content, image_path FROM messages WHERE conversation_id = ? ORDER BY id ASC', (conversation_id,))
+        return [{"role": row[0], "content": row[1], "image_path": row[2]} for row in cursor.fetchall()]
 
     def get_last_message(self, conversation_id):
-        self.cursor.execute(
+        cursor = self.conn.execute(
             '''
             SELECT id, role, content, image_path
             FROM messages
@@ -156,7 +156,7 @@ class AgentMemory:
             ''',
             (conversation_id,)
         )
-        row = self.cursor.fetchone()
+        row = cursor.fetchone()
         if not row:
             return None
         return {
@@ -167,7 +167,7 @@ class AgentMemory:
         }
 
     def clear_history(self, conversation_id):
-        self.cursor.execute('DELETE FROM messages WHERE conversation_id = ?', (conversation_id,))
+        cursor = self.conn.execute('DELETE FROM messages WHERE conversation_id = ?', (conversation_id,))
         self.conn.commit()
 
     def _current_timestamp(self):
@@ -258,7 +258,7 @@ class AgentMemory:
         return text[:MAX_MEMORY_SNIPPET_CHARS].rstrip() + "..."
 
     def get_recent_memories(self, limit=6):
-        self.cursor.execute(
+        cursor = self.conn.execute(
             '''
             SELECT role, content, timestamp
             FROM messages
@@ -269,7 +269,7 @@ class AgentMemory:
         )
         return [
             self._format_memory_line(role, content, timestamp)
-            for role, content, timestamp in self.cursor.fetchall()
+            for role, content, timestamp in cursor.fetchall()
         ]
 
     def search_vector_memory(self, query_embedding, n_results=5):
