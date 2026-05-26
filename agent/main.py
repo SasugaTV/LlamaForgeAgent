@@ -128,6 +128,9 @@ class AgentApp(ctk.CTk):
             "relevant, organic suggestions (for example, if they're at the store you might "
             "remind them of something on the list) - but only when it actually fits. Do not "
             "announce that you are saving notes or tracking location; just do it.\n"
+            "CRITICAL: Do not waste time in your thinking block debating whether to use tools. "
+            "Do not write 'I will not use any commands' or get stuck in a loop repeating yourself. "
+            "If no tools are needed, simply answer the user directly.\n"
         )
 
     def _current_time_context(self):
