@@ -1017,6 +1017,21 @@ finally {
                 ] + recent_messages
                 print("Context compressed successfully.")
 
+    def _detect_loop(self, text):
+        if not text or len(text) < 60:
+            return False
+        # Only check the last 1000 characters to keep it fast
+        tail = text[-1000:]
+        length = len(tail)
+        # We look for a repeating pattern of length 15 to 200.
+        # If it repeats 4 times consecutively at the end, it's an infinite loop.
+        for pat_len in range(15, 200):
+            if length >= pat_len * 4:
+                pattern = tail[-pat_len:]
+                if tail.endswith(pattern * 4):
+                    return True
+        return False
+
     def process_message(self, user_text, img_path, repost_existing=False):
         try:
             is_first_user_message = (
@@ -1072,145 +1087,170 @@ finally {
                     self.after(0, self.update_memory_count_display)
 
             self.manage_context()
-            query_context = list(self.working_context)
-
-            query_context = self._append_query_system_context(
-                query_context,
-                "Current date and time",
-                self._current_time_context()
-            )
-            query_context = self._append_query_system_context(
-                query_context,
-                "User's current location",
-                self._location_context()
-            )
-            query_context = self._append_query_system_context(
-                query_context,
-                "Your notepad (always visible to you)",
-                self._load_notepad_context()
-            )
-            query_context = self._append_query_system_context(
-                query_context,
-                "Session startup memory",
-                first_turn_memory_context
-            )
-            query_context = self._append_query_system_context(
-                query_context,
-                "Relevant past memories for this query",
-                "\n".join(relevant_past)
-            )
-            query_context = self._append_query_system_context(
-                query_context,
-                "Relevant notes you saved earlier",
-                "\n".join(relevant_notes)
-            )
-
-            # The prompt injection for max_drafts has been removed as it was causing infinite loops.
-
-            def start_agent_msg():
-                self.append_to_display("Agent: ", "agent_text")
-                
-            self.after(0, start_agent_msg)
             
-            query_context = self._sanitize_messages(query_context)
-            prompt_tokens = self._count_message_tokens(query_context)
-            self.after(
-                0,
-                lambda count=prompt_tokens: self._set_llamaforge_status(
-                    loading=True,
-                    tokens_up_active=True,
-                    inferencing=False,
-                    tokens_down_active=False,
-                    tokens_up=count,
-                    tokens_down=0,
+            max_attempts = 2
+            attempt = 0
+            
+            while attempt < max_attempts:
+                attempt += 1
+                query_context = list(self.working_context)
+
+                query_context = self._append_query_system_context(
+                    query_context,
+                    "Current date and time",
+                    self._current_time_context()
                 )
-            )
-            response_stream = self.llm.get_chat_response(query_context, stream=True)
-            self.after(0, lambda: self._set_llamaforge_status(tokens_up_active=False))
-            
-            full_response = ""
-            clean_response = ""
-            full_reasoning = ""
-            command_filter = CommandStreamFilter()
-            in_reasoning = False
-            current_block_id = None
-            reasoning_speech_id = None
-            final_speech_id = self._create_tts_payload("")
-            final_button_inserted = False
-            stream_started = False
-            
-            if response_stream:
-                self.cancel_inference_flag = False
-                for chunk in response_stream:
-                    if self.cancel_inference_flag:
-                        self.after(0, lambda: self.append_to_display("\n[Inference Cancelled]\n"))
-                        break
-                    
-                    if not stream_started:
-                        stream_started = True
-                        self.after(
-                            0,
-                            lambda: self._set_llamaforge_status(
-                                loading=False,
-                                inferencing=True,
-                                tokens_down_active=True,
-                            )
-                        )
+                query_context = self._append_query_system_context(
+                    query_context,
+                    "User's current location",
+                    self._location_context()
+                )
+                query_context = self._append_query_system_context(
+                    query_context,
+                    "Your notepad (always visible to you)",
+                    self._load_notepad_context()
+                )
+                query_context = self._append_query_system_context(
+                    query_context,
+                    "Session startup memory",
+                    first_turn_memory_context
+                )
+                query_context = self._append_query_system_context(
+                    query_context,
+                    "Relevant past memories for this query",
+                    "\n".join(relevant_past)
+                )
+                query_context = self._append_query_system_context(
+                    query_context,
+                    "Relevant notes you saved earlier",
+                    "\n".join(relevant_notes)
+                )
 
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-                    reasoning = getattr(delta, "reasoning_content", None)
-                    if reasoning is None:
-                        extra = getattr(delta, "model_extra", None) or {}
-                        reasoning = extra.get("reasoning_content")
-                    content = getattr(delta, "content", None)
-
-                    if reasoning:
-                        if not in_reasoning:
-                            in_reasoning = True
-                            self.reasoning_counter += 1
-                            current_block_id = f"reason_{self.reasoning_counter}"
-                            reasoning_speech_id = self._create_tts_payload("")
+                if attempt > 1:
+                    query_context.append({
+                        "role": "system",
+                        "content": "SYSTEM WARNING: Your previous attempt to answer was terminated because you entered an infinite repetition loop. You must break out of your previous thought pattern. Do not repeat phrases. Provide a direct, concise answer."
+                    })
+                    self.after(0, lambda: self.append_to_display("\n[Loop Detected! Restarting Generation...]\n", "reasoning"))
+                else:
+                    def start_agent_msg():
+                        self.append_to_display("Agent: ", "agent_text")
+                    self.after(0, start_agent_msg)
+                
+                query_context = self._sanitize_messages(query_context)
+                prompt_tokens = self._count_message_tokens(query_context)
+                self.after(
+                    0,
+                    lambda count=prompt_tokens: self._set_llamaforge_status(
+                        loading=True,
+                        tokens_up_active=True,
+                        inferencing=False,
+                        tokens_down_active=False,
+                        tokens_up=count,
+                        tokens_down=0,
+                    )
+                )
+                response_stream = self.llm.get_chat_response(query_context, stream=True)
+                self.after(0, lambda: self._set_llamaforge_status(tokens_up_active=False))
+                
+                full_response = ""
+                clean_response = ""
+                full_reasoning = ""
+                command_filter = CommandStreamFilter()
+                in_reasoning = False
+                current_block_id = None
+                reasoning_speech_id = None
+                final_speech_id = self._create_tts_payload("")
+                final_button_inserted = False
+                stream_started = False
+                loop_detected = False
+                
+                if response_stream:
+                    self.cancel_inference_flag = False
+                    for chunk in response_stream:
+                        if self.cancel_inference_flag:
+                            self.after(0, lambda: self.append_to_display("\n[Inference Cancelled]\n"))
+                            break
+                        
+                        if not stream_started:
+                            stream_started = True
                             self.after(
                                 0,
-                                lambda b=current_block_id, sid=reasoning_speech_id: self._ui_start_reasoning_block(b, sid)
+                                lambda: self._set_llamaforge_status(
+                                    loading=False,
+                                    inferencing=True,
+                                    tokens_down_active=True,
+                                )
                             )
-                            
-                        full_reasoning += reasoning
-                        if reasoning_speech_id:
-                            self._set_tts_payload(reasoning_speech_id, full_reasoning)
-                        self.after(0, lambda b=current_block_id, t=reasoning: self._ui_append_reasoning(b, t))
 
-                    if content:
-                        if in_reasoning:
-                            in_reasoning = False
-                            self.after(0, lambda b=current_block_id: self._ui_end_reasoning_block(b))
-                            
-                        if not final_button_inserted:
-                            final_button_inserted = True
-                            self.after(0, lambda sid=final_speech_id: self._ui_insert_tts_button(sid))
-                            self.after(0, lambda: self.append_to_display(" "))
+                        if not chunk.choices:
+                            continue
+                        delta = chunk.choices[0].delta
+                        reasoning = getattr(delta, "reasoning_content", None)
+                        if reasoning is None:
+                            extra = getattr(delta, "model_extra", None) or {}
+                            reasoning = extra.get("reasoning_content")
+                        content = getattr(delta, "content", None)
 
-                        full_response += content
-                        visible = command_filter.feed(content)
-                        if visible:
-                            clean_response += visible
-                            self._set_tts_payload(final_speech_id, clean_response)
-                            self.after(0, lambda text=visible: self.append_to_display(text))
+                        if reasoning:
+                            if not in_reasoning:
+                                in_reasoning = True
+                                self.reasoning_counter += 1
+                                current_block_id = f"reason_{self.reasoning_counter}"
+                                reasoning_speech_id = self._create_tts_payload("")
+                                self.after(
+                                    0,
+                                    lambda b=current_block_id, sid=reasoning_speech_id: self._ui_start_reasoning_block(b, sid)
+                                )
+                                
+                            full_reasoning += reasoning
+                            if reasoning_speech_id:
+                                self._set_tts_payload(reasoning_speech_id, full_reasoning)
+                            self.after(0, lambda b=current_block_id, t=reasoning: self._ui_append_reasoning(b, t))
 
-                    if reasoning or content:
-                        output_tokens = self.llm.count_tokens(full_reasoning) + self.llm.count_tokens(full_response)
-                        self.after(
-                            0,
-                            lambda count=output_tokens: self._set_llamaforge_status(
-                                inferencing=True,
-                                tokens_down_active=True,
-                                tokens_down=count,
+                        if content:
+                            if in_reasoning:
+                                in_reasoning = False
+                                self.after(0, lambda b=current_block_id: self._ui_end_reasoning_block(b))
+                                
+                            if not final_button_inserted:
+                                final_button_inserted = True
+                                self.after(0, lambda sid=final_speech_id: self._ui_insert_tts_button(sid))
+                                self.after(0, lambda: self.append_to_display(" "))
+
+                            full_response += content
+                            visible = command_filter.feed(content)
+                            if visible:
+                                clean_response += visible
+                                self._set_tts_payload(final_speech_id, clean_response)
+                                self.after(0, lambda text=visible: self.append_to_display(text))
+
+                        if reasoning or content:
+                            output_tokens = self.llm.count_tokens(full_reasoning) + self.llm.count_tokens(full_response)
+                            self.after(
+                                0,
+                                lambda count=output_tokens: self._set_llamaforge_status(
+                                    inferencing=True,
+                                    tokens_down_active=True,
+                                    tokens_down=count,
+                                )
                             )
-                        )
-            else:
-                self.after(0, lambda: self.append_to_display("[Error: response_stream is None. Connection failed.]"))
+                        
+                        if self._detect_loop(full_reasoning) or self._detect_loop(full_response):
+                            loop_detected = True
+                            break
+                else:
+                    self.after(0, lambda: self.append_to_display("[Error: response_stream is None. Connection failed.]"))
+
+                if loop_detected:
+                    if in_reasoning:
+                        self.after(0, lambda b=current_block_id: self._ui_end_reasoning_block(b))
+                    if attempt < max_attempts:
+                        continue
+                    else:
+                        self.after(0, lambda: self.append_to_display("\n[Loop Detected! Max recoveries reached.]\n", "reasoning"))
+
+                break
 
             # Release any text the command filter was holding back.
             tail = command_filter.flush()
