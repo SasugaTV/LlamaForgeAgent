@@ -23,6 +23,10 @@ class AgentMemory:
         self.chroma_client = chromadb.PersistentClient(path=os.path.join(db_path, "vector_store"))
         self.collection = self.chroma_client.get_or_create_collection(name="conversation_memory")
 
+        # Curated long-term notes the agent chooses to keep, kept apart from
+        # raw conversation memory so deliberate facts aren't drowned out.
+        self.notes_collection = self.chroma_client.get_or_create_collection(name="agent_notes")
+
     def _init_sqlite(self):
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS conversations (
@@ -140,6 +144,27 @@ class AgentMemory:
     def get_all_messages(self, conversation_id):
         self.cursor.execute('SELECT role, content, image_path FROM messages WHERE conversation_id = ? ORDER BY id ASC', (conversation_id,))
         return [{"role": row[0], "content": row[1], "image_path": row[2]} for row in self.cursor.fetchall()]
+
+    def get_last_message(self, conversation_id):
+        self.cursor.execute(
+            '''
+            SELECT id, role, content, image_path
+            FROM messages
+            WHERE conversation_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            ''',
+            (conversation_id,)
+        )
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "role": row[1],
+            "content": row[2],
+            "image_path": row[3],
+        }
 
     def clear_history(self, conversation_id):
         self.cursor.execute('DELETE FROM messages WHERE conversation_id = ?', (conversation_id,))
@@ -271,3 +296,43 @@ class AgentMemory:
     def get_total_memories(self):
         """Return the total number of items stored in the vector database."""
         return self.collection.count()
+
+    def add_note(self, text, embedding):
+        """Store a durable note the agent chose to remember."""
+        text = " ".join(str(text or "").split())
+        if not text or embedding is None:
+            return
+        created_at = self._current_timestamp()
+        doc_id = f"note_{hash(text)}_{created_at}"
+        self.notes_collection.add(
+            embeddings=[embedding],
+            documents=[text],
+            metadatas=[{"created_at": created_at, "memory_type": "note"}],
+            ids=[doc_id],
+        )
+
+    def get_total_notes(self):
+        """Return how many durable notes the agent has saved."""
+        return self.notes_collection.count()
+
+    def search_notes(self, query_embedding, n_results=3):
+        """Retrieve the durable notes most relevant to the current query."""
+        if self.notes_collection.count() == 0:
+            return []
+
+        results = self.notes_collection.query(
+            query_embeddings=[query_embedding],
+            n_results=n_results,
+        )
+
+        notes = []
+        if results and results.get("documents") and results["documents"][0]:
+            docs = results["documents"][0]
+            metas = results["metadatas"][0]
+            for i in range(len(docs)):
+                timestamp = (metas[i] or {}).get("created_at")
+                recorded = "saved at an unknown time"
+                if timestamp:
+                    recorded = f"saved {str(timestamp)[:10]} ({self._relative_age(timestamp)})"
+                notes.append(f"- {self._trim_memory_snippet(docs[i])} ({recorded})")
+        return notes

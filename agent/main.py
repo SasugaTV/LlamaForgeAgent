@@ -1,6 +1,7 @@
 import customtkinter as ctk
 import threading
 import os
+import json
 import shutil
 import subprocess
 import base64
@@ -12,6 +13,7 @@ from PIL import Image, ImageTk
 
 from memory import AgentMemory
 from llm_client import LlamaForgeClient
+from agent_commands import CommandStreamFilter, parse_commands
 
 class AgentApp(ctk.CTk):
     def __init__(self):
@@ -76,12 +78,23 @@ class AgentApp(ctk.CTk):
             self.load_conversation(convos[0]["id"])
         else:
             self.new_conversation()
-            
+
         self.update_memory_count_display()
+        self._refresh_location_label()
 
     def update_memory_count_display(self):
         count = self.memory.get_total_memories()
-        self.memory_count_label.configure(text=f"Memories: {count}")
+        notes = self.memory.get_total_notes()
+        text = f"Memories: {count}"
+        if notes:
+            text += f"  |  Notes: {notes}"
+        self.memory_count_label.configure(text=text)
+
+    def _refresh_location_label(self):
+        if not hasattr(self, "location_label"):
+            return
+        place = (self._get_location().get("location") or "").strip()
+        self.location_label.configure(text=f"📍 {place}" if place else "📍 location unknown")
 
     def _load_system_prompt(self):
         base_prompt = "You are a helpful, smart local AI assistant. You have access to vector memory to recall past events.\n"
@@ -94,7 +107,28 @@ class AgentApp(ctk.CTk):
         if os.path.exists(user_path):
             with open(user_path, "r", encoding="utf-8") as f:
                 base_prompt += f"\n--- USER CONTEXT (USER) ---\n{f.read()}\n"
+        base_prompt += self._self_management_instructions()
         return base_prompt
+
+    def _self_management_instructions(self):
+        return (
+            "\n--- SELF-MANAGEMENT TOOLS ---\n"
+            "You can quietly maintain your own state by embedding bracket commands anywhere "
+            "in your reply. They are stripped out before the user sees the reply, so never "
+            "mention, explain, or read them aloud. Use them naturally and sparingly.\n"
+            "[[LOCATION: place]] - Record where the user currently is (e.g. office, home, "
+            "grocery store, gym) whenever they say so or it's clear they've moved.\n"
+            "[[NOTE: text]] - Add a short-lived reminder to your always-visible notepad "
+            "(errands, things to follow up on soon).\n"
+            "[[NOTE_DONE: text]] - Remove a notepad reminder once it's handled; it matches "
+            "any notepad line containing that text.\n"
+            "[[REMEMBER: text]] - Save a durable fact or preference to long-term memory for "
+            "future recall.\n"
+            "You are told the user's current setting on every turn. Use it on your own to make "
+            "relevant, organic suggestions (for example, if they're at the store you might "
+            "remind them of something on the list) - but only when it actually fits. Do not "
+            "announce that you are saving notes or tracking location; just do it.\n"
+        )
 
     def _current_time_context(self):
         now = datetime.now().astimezone()
@@ -103,27 +137,131 @@ class AgentApp(ctk.CTk):
             "Treat recalled memories as dated observations; time-sensitive memories may be stale, resolved, or superseded."
         )
 
+    def _notepad_path(self):
+        return os.path.join(self.data_dir, "NOTEPAD.md")
+
+    def _location_path(self):
+        return os.path.join(self.data_dir, "location.json")
+
     def _load_notepad_context(self):
-        notepad_path = os.path.join(self.data_dir, "NOTEPAD.md")
+        notepad_path = self._notepad_path()
         if not os.path.exists(notepad_path):
             return ""
         with open(notepad_path, "r", encoding="utf-8") as f:
             return f.read().strip()
 
+    def _get_location(self):
+        try:
+            with open(self._location_path(), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+    def _humanize_minutes(self, minutes):
+        if minutes < 0:
+            return "just now"
+        if minutes < 1:
+            return "moments ago"
+        if minutes < 60:
+            return "1 minute ago" if minutes == 1 else f"{minutes} minutes ago"
+        hours = minutes // 60
+        if hours < 24:
+            return "about an hour ago" if hours == 1 else f"about {hours} hours ago"
+        days = hours // 24
+        return "yesterday" if days == 1 else f"{days} days ago"
+
+    def _location_context(self):
+        data = self._get_location()
+        place = (data.get("location") or "").strip()
+        if not place:
+            return ""
+        suffix = ""
+        set_at = data.get("set_at")
+        if set_at:
+            try:
+                stated = datetime.fromisoformat(set_at)
+                now = datetime.now(stated.tzinfo) if stated.tzinfo else datetime.now()
+                minutes = int((now - stated).total_seconds() // 60)
+                suffix = f" (stated {self._humanize_minutes(minutes)})"
+            except ValueError:
+                pass
+        return (
+            f"The user's most recently stated location is: {place}{suffix}. "
+            "This may be stale - if their messages suggest they've moved, update it. "
+            "Let the setting shape relevant, organic suggestions when it genuinely fits."
+        )
+
+    def _set_location(self, place):
+        place = " ".join(str(place or "").split())
+        if not place:
+            return
+        payload = {
+            "location": place,
+            "set_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        with open(self._location_path(), "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        self.after(0, self._refresh_location_label)
+
+    def _append_note(self, text):
+        text = " ".join(str(text or "").split())
+        if not text:
+            return
+        line = f"- {datetime.now().strftime('%Y-%m-%d')}: {text}"
+        existing = self._load_notepad_context()
+        body = f"{existing}\n{line}" if existing else line
+        with open(self._notepad_path(), "w", encoding="utf-8") as f:
+            f.write(body.strip() + "\n")
+
+    def _complete_note(self, text):
+        needle = " ".join(str(text or "").split()).lower()
+        if not needle or not os.path.exists(self._notepad_path()):
+            return
+        with open(self._notepad_path(), "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        kept = [ln for ln in lines if needle not in ln.lower()]
+        remaining = "\n".join(kept).strip()
+        with open(self._notepad_path(), "w", encoding="utf-8") as f:
+            f.write(remaining + "\n" if remaining else "")
+
+    def _remember_note(self, text):
+        text = " ".join(str(text or "").split())
+        if not text:
+            return
+        embedding = self.llm.get_embedding(text)
+        if embedding:
+            self.memory.add_note(text, embedding)
+            self.after(0, self.update_memory_count_display)
+
+    def _apply_agent_commands(self, commands):
+        handlers = {
+            "LOCATION": self._set_location,
+            "NOTE": self._append_note,
+            "NOTE_DONE": self._complete_note,
+            "REMEMBER": self._remember_note,
+        }
+        for keyword, value in commands:
+            handler = handlers.get(keyword)
+            if handler and value:
+                try:
+                    handler(value)
+                except Exception as e:
+                    print(f"Failed to apply agent command {keyword}: {e}")
+
     def _is_first_user_message(self):
         return not any(message.get("role") == "user" for message in self.working_context)
 
-    def _build_first_turn_memory_context(self):
-        sections = []
-        notepad = self._load_notepad_context()
-        if notepad:
-            sections.append(f"Agent notepad:\n{notepad}")
+    def _user_message_count(self):
+        return sum(1 for message in self.working_context if message.get("role") == "user")
 
+    def _build_first_turn_memory_context(self):
         recent_memories = self.memory.get_recent_memories(limit=6)
         if recent_memories:
-            sections.append("Recent memories:\n" + "\n".join(recent_memories))
+            return "Recent memories:\n" + "\n".join(recent_memories)
+        return ""
 
-        return "\n\n".join(sections)
+    def cancel_generation(self):
+        self.cancel_inference_flag = True
 
     def _append_query_system_context(self, query_context, title, content):
         if not content or not query_context or query_context[0].get("role") != "system":
@@ -153,7 +291,10 @@ class AgentApp(ctk.CTk):
         self.conv_list_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
 
         self.memory_count_label = ctk.CTkLabel(self.sidebar_frame, text="Memories: 0", font=ctk.CTkFont(size=12, slant="italic"), text_color="gray50")
-        self.memory_count_label.grid(row=3, column=0, pady=(0, 10))
+        self.memory_count_label.grid(row=3, column=0, pady=(0, 2))
+
+        self.location_label = ctk.CTkLabel(self.sidebar_frame, text="📍 location unknown", font=ctk.CTkFont(size=12, slant="italic"), text_color="gray60")
+        self.location_label.grid(row=4, column=0, pady=(0, 10))
 
         # --- Main Area ---
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -179,6 +320,20 @@ class AgentApp(ctk.CTk):
 
         self.thinking_switch = ctk.CTkSwitch(self.action_frame, text="Show Thinking", variable=self.global_show_thinking, command=self.toggle_all_thinking)
         self.thinking_switch.pack(side="right", padx=10)
+        
+        self.max_drafts_var = ctk.IntVar(value=0)
+        self.max_drafts_slider = ctk.CTkSlider(self.action_frame, from_=0, to=10, number_of_steps=10, variable=self.max_drafts_var, width=100)
+        self.max_drafts_slider.pack(side="right", padx=5)
+        self.max_drafts_label = ctk.CTkLabel(self.action_frame, text="Drafts: Any")
+        self.max_drafts_label.pack(side="right", padx=5)
+        def _update_drafts_label(*args):
+            val = self.max_drafts_var.get()
+            self.max_drafts_label.configure(text=f"Drafts: {val if val > 0 else 'Any'}")
+        self.max_drafts_var.trace_add("write", _update_drafts_label)
+        
+        self.cancel_inference_flag = False
+        self.cancel_btn = ctk.CTkButton(self.action_frame, text="Stop Generate", width=80, fg_color="#d48c00", hover_color="#a86e00", command=self.cancel_generation)
+        self.cancel_btn.pack(side="right", padx=5)
 
         self.zoom_out_btn = ctk.CTkButton(self.action_frame, text="A-", width=40, command=self.decrease_font_size)
         self.zoom_out_btn.pack(side="right", padx=5)
@@ -243,14 +398,23 @@ class AgentApp(ctk.CTk):
         self.send_button = ctk.CTkButton(self.input_frame, text="Send", width=80, command=self.send_message)
         self.send_button.grid(row=0, column=2)
 
+        self.repost_button = ctk.CTkButton(
+            self.input_frame,
+            text="Repost Last",
+            width=90,
+            state="disabled",
+            command=self.repost_last_message
+        )
+        self.repost_button.grid(row=0, column=3, padx=(10, 0))
+
         self.scroll_bottom_btn = ctk.CTkButton(self.input_frame, text="↓ Bottom", width=60, command=self.scroll_to_bottom)
-        self.scroll_bottom_btn.grid(row=0, column=3, padx=(10, 0))
+        self.scroll_bottom_btn.grid(row=0, column=4, padx=(10, 0))
 
         self.image_preview_label = ctk.CTkLabel(self.input_frame, text="", text_color="green")
         self.image_preview_label.grid(row=1, column=1, sticky="w", pady=(5,0))
 
         self.queue_status_label = ctk.CTkLabel(self.input_frame, text="", text_color="gray50")
-        self.queue_status_label.grid(row=1, column=2, columnspan=2, sticky="e", pady=(5,0))
+        self.queue_status_label.grid(row=1, column=2, columnspan=3, sticky="e", pady=(5,0))
 
     def load_conversations_list(self):
         for widget in self.conv_list_frame.winfo_children():
@@ -352,6 +516,7 @@ class AgentApp(ctk.CTk):
 
                 self.append_to_display(f"{text_content}\n\n")
                 self.working_context.append({"role": role, "content": msg["content"]})
+        self._update_repost_button_state()
                 
     def rename_current_conversation(self):
         if not self.current_conversation_id: return
@@ -859,45 +1024,53 @@ finally {
                 ] + recent_messages
                 print("Context compressed successfully.")
 
-    def process_message(self, user_text, img_path):
+    def process_message(self, user_text, img_path, repost_existing=False):
         try:
-            is_first_user_message = self._is_first_user_message()
+            is_first_user_message = (
+                self._user_message_count() <= 1
+                if repost_existing else self._is_first_user_message()
+            )
             first_turn_memory_context = (
                 self._build_first_turn_memory_context() if is_first_user_message else ""
             )
 
             self.after(0, self._start_llamaforge_request_status)
-            self.after(0, lambda: self.append_to_display("You: ", "user_text"))
-            
-            if img_path:
-                self.after(0, lambda p=img_path: self.insert_image_to_display(p))
-                self.after(0, lambda: self.append_to_display(f"\n{user_text}\n\n"))
+
+            user_msg_id = None
+            if not repost_existing:
+                self.after(0, lambda: self.append_to_display("You: ", "user_text"))
                 
-                with open(img_path, "rb") as f:
-                    b64_img = base64.b64encode(f.read()).decode('utf-8')
+                if img_path:
+                    self.after(0, lambda p=img_path: self.insert_image_to_display(p))
+                    self.after(0, lambda: self.append_to_display(f"\n{user_text}\n\n"))
+                    
+                    with open(img_path, "rb") as f:
+                        b64_img = base64.b64encode(f.read()).decode('utf-8')
+                    
+                    content_for_llm = [
+                        {"type": "text", "text": user_text},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
+                    ]
+                else:
+                    self.after(0, lambda: self.append_to_display(f"{user_text}\n\n"))
+                    content_for_llm = user_text
                 
-                content_for_llm = [
-                    {"type": "text", "text": user_text},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
-                ]
-            else:
-                self.after(0, lambda: self.append_to_display(f"{user_text}\n\n"))
-                content_for_llm = user_text
-            
-            user_msg_id = self.memory.add_message_to_sqlite(self.current_conversation_id, "user", user_text, img_path)
-            self.working_context.append({"role": "user", "content": content_for_llm})
-            
-            self.after(0, self.load_conversations_list) # Update sidebar timestamps
+                user_msg_id = self.memory.add_message_to_sqlite(self.current_conversation_id, "user", user_text, img_path)
+                self.working_context.append({"role": "user", "content": content_for_llm})
+                
+                self.after(0, self.load_conversations_list) # Update sidebar timestamps
 
             # Vector embed the text part
             user_emb = self.llm.get_embedding(user_text)
             relevant_past = []
+            relevant_notes = []
             if user_emb:
                 # Search for past memories BEFORE adding the current message to avoid echoing the prompt
                 relevant_past = self.memory.search_vector_memory(user_emb, n_results=5)
+                relevant_notes = self.memory.search_notes(user_emb, n_results=3)
                 
                 # Now add the current message to the memory if it's long enough
-                if len(user_text.split()) > 3:
+                if not repost_existing and len(user_text.split()) > 3:
                     self.memory.add_to_vector_memory(
                         user_text,
                         {"id": user_msg_id, "role": "user", "memory_type": "message"},
@@ -915,6 +1088,16 @@ finally {
             )
             query_context = self._append_query_system_context(
                 query_context,
+                "User's current location",
+                self._location_context()
+            )
+            query_context = self._append_query_system_context(
+                query_context,
+                "Your notepad (always visible to you)",
+                self._load_notepad_context()
+            )
+            query_context = self._append_query_system_context(
+                query_context,
                 "Session startup memory",
                 first_turn_memory_context
             )
@@ -923,6 +1106,19 @@ finally {
                 "Relevant past memories for this query",
                 "\n".join(relevant_past)
             )
+            query_context = self._append_query_system_context(
+                query_context,
+                "Relevant notes you saved earlier",
+                "\n".join(relevant_notes)
+            )
+
+            max_drafts = self.max_drafts_var.get()
+            if max_drafts > 0:
+                query_context = self._append_query_system_context(
+                    query_context,
+                    "Strict Output Rule",
+                    f"CRITICAL RULE: Do not write multiple drafts or get caught in an infinite self-correction loop. You are strictly forbidden from writing more than {max_drafts} draft(s). You must finalize your thoughts and close the thinking block to provide the final answer immediately after reaching this limit."
+                )
 
             def start_agent_msg():
                 self.append_to_display("Agent: ", "agent_text")
@@ -946,7 +1142,9 @@ finally {
             self.after(0, lambda: self._set_llamaforge_status(tokens_up_active=False))
             
             full_response = ""
+            clean_response = ""
             full_reasoning = ""
+            command_filter = CommandStreamFilter()
             in_reasoning = False
             current_block_id = None
             reasoning_speech_id = None
@@ -955,7 +1153,12 @@ finally {
             stream_started = False
             
             if response_stream:
+                self.cancel_inference_flag = False
                 for chunk in response_stream:
+                    if self.cancel_inference_flag:
+                        self.after(0, lambda: self.append_to_display("\n[Inference Cancelled]\n"))
+                        break
+                    
                     if not stream_started:
                         stream_started = True
                         self.after(
@@ -1003,8 +1206,11 @@ finally {
                             self.after(0, lambda: self.append_to_display(" "))
 
                         full_response += content
-                        self._set_tts_payload(final_speech_id, full_response)
-                        self.after(0, lambda text=content: self.append_to_display(text))
+                        visible = command_filter.feed(content)
+                        if visible:
+                            clean_response += visible
+                            self._set_tts_payload(final_speech_id, clean_response)
+                            self.after(0, lambda text=visible: self.append_to_display(text))
 
                     if reasoning or content:
                         output_tokens = self.llm.count_tokens(full_reasoning) + self.llm.count_tokens(full_response)
@@ -1019,18 +1225,30 @@ finally {
             else:
                 self.after(0, lambda: self.append_to_display("[Error: response_stream is None. Connection failed.]"))
 
+            # Release any text the command filter was holding back.
+            tail = command_filter.flush()
+            if tail:
+                clean_response += tail
+                self.after(0, lambda text=tail: self.append_to_display(text))
+
+            # Authoritatively extract the agent's self-management commands and
+            # apply them; store/speak only the user-facing (cleaned) reply.
+            final_clean, agent_cmds = parse_commands(full_response)
+            if agent_cmds:
+                self._apply_agent_commands(agent_cmds)
+
             self.after(0, self._finish_llamaforge_request_status)
             self.after(0, lambda: self.append_to_display("\n\n"))
             if full_reasoning and reasoning_speech_id:
                 self.after(0, lambda sid=reasoning_speech_id, text=full_reasoning: self._set_tts_payload(sid, text))
-            if full_response:
-                self.after(0, lambda sid=final_speech_id, text=full_response: self._finalize_final_tts(sid, text))
+            if final_clean:
+                self.after(0, lambda sid=final_speech_id, text=final_clean: self._finalize_final_tts(sid, text))
 
-            if full_response or full_reasoning:
-                db_content = full_response
+            if final_clean or full_reasoning:
+                db_content = final_clean
                 if full_reasoning:
-                    db_content = f"<think>\n{full_reasoning}\n</think>\n{full_response}"
-                    
+                    db_content = f"<think>\n{full_reasoning}\n</think>\n{final_clean}"
+
                 ai_msg_id = self.memory.add_message_to_sqlite(self.current_conversation_id, "assistant", db_content, None)
                 self.working_context.append({"role": "assistant", "content": db_content})
                 ai_emb = self.llm.get_embedding(db_content)
@@ -1061,12 +1279,35 @@ finally {
         else:
             self.send_button.configure(text="Send")
             self.queue_status_label.configure(text="")
+        self._update_repost_button_state()
 
-    def _start_message_processing(self, text, img):
+    def _get_repost_candidate(self):
+        if not self.current_conversation_id:
+            return None
+        latest_message = self.memory.get_last_message(self.current_conversation_id)
+        if latest_message and latest_message.get("role") == "user":
+            return latest_message
+        return None
+
+    def _update_repost_button_state(self):
+        if not hasattr(self, "repost_button"):
+            return
+        state = (
+            "normal"
+            if not self.agent_busy and self._get_repost_candidate()
+            else "disabled"
+        )
+        self.repost_button.configure(state=state)
+
+    def _start_message_processing(self, text, img, repost_existing=False):
         self.agent_busy = True
         self.chat_follow_output = self._is_chat_near_bottom()
         self._update_queue_status()
-        threading.Thread(target=self.process_message, args=(text, img), daemon=True).start()
+        threading.Thread(
+            target=self.process_message,
+            args=(text, img, repost_existing),
+            daemon=True
+        ).start()
 
     def _finish_message_processing(self):
         if self.message_queue:
@@ -1078,6 +1319,29 @@ finally {
         self.agent_busy = False
         self._update_queue_status()
         self.entry.focus()
+
+    def repost_last_message(self):
+        if self.agent_busy:
+            return
+
+        candidate = self._get_repost_candidate()
+        if not candidate:
+            self._update_repost_button_state()
+            return
+
+        text = (candidate.get("content") or "").strip()
+        img = candidate.get("image_path")
+        if img and not os.path.exists(img):
+            messagebox.showwarning(
+                "Repost Last",
+                "The last message had an image attachment, but the image file is missing."
+            )
+            return
+
+        if not text and not img:
+            return
+
+        self._start_message_processing(text, img, repost_existing=True)
 
     def send_message(self):
         text = self.entry.get().strip()
