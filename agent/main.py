@@ -1131,7 +1131,7 @@ finally {
                         "role": "system",
                         "content": "SYSTEM WARNING: Your previous attempt to answer was terminated because you entered an infinite repetition loop. You must break out of your previous thought pattern. Do not repeat phrases. Provide a direct, concise answer."
                     })
-                    self.after(0, lambda: self.append_to_display("\n[Loop Detected! Restarting Generation...]\n", "reasoning"))
+                    print("[Loop Detected! Restarting Generation...]")
                 else:
                     def start_agent_msg():
                         self.append_to_display("Agent: ", "agent_text")
@@ -1248,7 +1248,7 @@ finally {
                     if attempt < max_attempts:
                         continue
                     else:
-                        self.after(0, lambda: self.append_to_display("\n[Loop Detected! Max recoveries reached.]\n", "reasoning"))
+                        print("[Loop Detected! Max recoveries reached.]")
 
                 break
 
