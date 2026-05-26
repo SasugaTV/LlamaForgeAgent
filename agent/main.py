@@ -321,15 +321,6 @@ class AgentApp(ctk.CTk):
         self.thinking_switch = ctk.CTkSwitch(self.action_frame, text="Show Thinking", variable=self.global_show_thinking, command=self.toggle_all_thinking)
         self.thinking_switch.pack(side="right", padx=10)
         
-        self.max_drafts_var = ctk.IntVar(value=3)
-        self.max_drafts_slider = ctk.CTkSlider(self.action_frame, from_=0, to=10, number_of_steps=10, variable=self.max_drafts_var, width=100)
-        self.max_drafts_slider.pack(side="right", padx=5)
-        self.max_drafts_label = ctk.CTkLabel(self.action_frame, text="Drafts: 3")
-        self.max_drafts_label.pack(side="right", padx=5)
-        def _update_drafts_label(*args):
-            val = self.max_drafts_var.get()
-            self.max_drafts_label.configure(text=f"Drafts: {val if val > 0 else 'Any'}")
-        self.max_drafts_var.trace_add("write", _update_drafts_label)        
         self.cancel_inference_flag = False
         self.cancel_btn = ctk.CTkButton(self.action_frame, text="Stop Generate", width=80, fg_color="#d48c00", hover_color="#a86e00", command=self.cancel_generation)
         self.cancel_btn.pack(side="right", padx=5)
