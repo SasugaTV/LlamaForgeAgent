@@ -1102,7 +1102,6 @@ finally {
                 "\n".join(relevant_notes)
             )
 
-            max_drafts = self.max_drafts_var.get()
             # The prompt injection for max_drafts has been removed as it was causing infinite loops.
 
             def start_agent_msg():
