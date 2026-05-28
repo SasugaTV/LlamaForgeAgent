@@ -114,23 +114,14 @@ class AgentApp(ctk.CTk):
         return (
             "\n--- SELF-MANAGEMENT TOOLS ---\n"
             "You can quietly maintain your own state by embedding bracket commands anywhere "
-            "in your reply. They are stripped out before the user sees the reply, so never "
-            "mention, explain, or read them aloud. Use them proactively to track active context.\n"
-            "[[LOCATION: place]] - Record where the user currently is (e.g. office, home, "
-            "grocery store, gym) whenever they say so or it's clear they've moved.\n"
-            "[[NOTE: text]] - Add a short-lived reminder or active context to your always-visible notepad "
-            "(current tasks, immediate goals, errands, things to follow up on soon).\n"
-            "[[NOTE_DONE: text]] - Remove a notepad reminder once it's handled or irrelevant; it matches "
-            "any notepad line containing that text.\n"
-            "[[REMEMBER: text]] - Save a durable fact or preference to long-term memory for "
-            "future recall.\n"
-            "You are told the user's current setting on every turn. Use it on your own to make "
-            "relevant, organic suggestions (for example, if they're at the store you might "
-            "remind them of something on the list) - but only when it actually fits. Do not "
-            "announce that you are saving notes or tracking location; just do it.\n"
-            "CRITICAL: Do not waste time in your thinking block debating whether to use tools. "
-            "Do not write 'I will not use any commands' or get stuck in a loop repeating yourself. "
-            "If no tools are needed, simply answer the user directly.\n"
+            "in your reply. They are stripped out before the user sees the reply.\n"
+            "Do not announce or explain when you use these tools; simply embed them if needed.\n\n"
+            "[[LOCATION: place]] - Record where the user currently is.\n"
+            "[[NOTE: text]] - Add a short-lived reminder to your notepad.\n"
+            "[[NOTE_DONE: text]] - Remove a handled reminder from your notepad.\n"
+            "[[REMEMBER: text]] - Save a durable fact to long-term memory.\n\n"
+            "If no tools are needed for the current turn, output your reply directly without hesitation. "
+            "Keep your internal reasoning brief and decisive.\n"
         )
 
     def _current_time_context(self):
@@ -275,6 +266,14 @@ class AgentApp(ctk.CTk):
         query_context[0] = sys_msg
         return query_context
 
+    def toggle_sidebar(self):
+        if self.sidebar_visible:
+            self.sidebar_frame.grid_remove()
+            self.sidebar_visible = False
+        else:
+            self.sidebar_frame.grid()
+            self.sidebar_visible = True
+
     def _build_gui(self):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -309,30 +308,12 @@ class AgentApp(ctk.CTk):
         self.action_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.action_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         
+        self.sidebar_visible = True
+        self.toggle_sidebar_btn = ctk.CTkButton(self.action_frame, text="☰", width=30, command=self.toggle_sidebar)
+        self.toggle_sidebar_btn.pack(side="left", padx=(0, 10))
+
         self.title_label = ctk.CTkLabel(self.action_frame, text="Select a conversation", font=ctk.CTkFont(size=18, weight="bold"))
         self.title_label.pack(side="left", padx=10)
-
-        self.del_btn = ctk.CTkButton(self.action_frame, text="Delete", width=60, fg_color="red", hover_color="darkred", command=self.delete_current_conversation)
-        self.del_btn.pack(side="right", padx=5)
-        
-        self.fork_btn = ctk.CTkButton(self.action_frame, text="Fork", width=60, command=self.fork_current_conversation)
-        self.fork_btn.pack(side="right", padx=5)
-
-        self.rename_btn = ctk.CTkButton(self.action_frame, text="Rename", width=60, command=self.rename_current_conversation)
-        self.rename_btn.pack(side="right", padx=5)
-
-        self.thinking_switch = ctk.CTkSwitch(self.action_frame, text="Show Thinking", variable=self.global_show_thinking, command=self.toggle_all_thinking)
-        self.thinking_switch.pack(side="right", padx=10)
-        
-        self.cancel_inference_flag = False
-        self.cancel_btn = ctk.CTkButton(self.action_frame, text="Stop Generate", width=80, fg_color="#d48c00", hover_color="#a86e00", command=self.cancel_generation)
-        self.cancel_btn.pack(side="right", padx=5)
-
-        self.zoom_out_btn = ctk.CTkButton(self.action_frame, text="A-", width=40, command=self.decrease_font_size)
-        self.zoom_out_btn.pack(side="right", padx=5)
-
-        self.zoom_in_btn = ctk.CTkButton(self.action_frame, text="A+", width=40, command=self.increase_font_size)
-        self.zoom_in_btn.pack(side="right", padx=5)
 
         self.tts_stop_btn = ctk.CTkButton(
             self.action_frame,
@@ -350,6 +331,28 @@ class AgentApp(ctk.CTk):
             variable=self.auto_tts_enabled
         )
         self.auto_tts_switch.pack(side="right", padx=10)
+
+        self.cancel_inference_flag = False
+        self.cancel_btn = ctk.CTkButton(self.action_frame, text="Stop Generate", width=80, fg_color="#d48c00", hover_color="#a86e00", command=self.cancel_generation)
+        self.cancel_btn.pack(side="right", padx=5)
+
+        self.del_btn = ctk.CTkButton(self.action_frame, text="Delete", width=60, fg_color="red", hover_color="darkred", command=self.delete_current_conversation)
+        self.del_btn.pack(side="right", padx=5)
+        
+        self.fork_btn = ctk.CTkButton(self.action_frame, text="Fork", width=60, command=self.fork_current_conversation)
+        self.fork_btn.pack(side="right", padx=5)
+
+        self.rename_btn = ctk.CTkButton(self.action_frame, text="Rename", width=60, command=self.rename_current_conversation)
+        self.rename_btn.pack(side="right", padx=5)
+
+        self.thinking_switch = ctk.CTkSwitch(self.action_frame, text="Show Thinking", variable=self.global_show_thinking, command=self.toggle_all_thinking)
+        self.thinking_switch.pack(side="right", padx=10)
+
+        self.zoom_out_btn = ctk.CTkButton(self.action_frame, text="A-", width=40, command=self.decrease_font_size)
+        self.zoom_out_btn.pack(side="right", padx=5)
+
+        self.zoom_in_btn = ctk.CTkButton(self.action_frame, text="A+", width=40, command=self.increase_font_size)
+        self.zoom_in_btn.pack(side="right", padx=5)
 
         # Chat display
         self.chat_display = ctk.CTkTextbox(self.main_frame, state="disabled", wrap="word", font=("Segoe UI", self.chat_font_size))
