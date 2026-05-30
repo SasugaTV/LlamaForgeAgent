@@ -104,7 +104,7 @@ class AgentMemory:
         cursor = self.conn.execute('DELETE FROM messages WHERE conversation_id = ?', (conversation_id,))
         self.conn.commit()
 
-    def fork_conversation(self, conversation_id, new_name=None):
+    def fork_conversation(self, conversation_id, new_name=None, up_to_message_id=None):
         cursor = self.conn.execute('SELECT name FROM conversations WHERE id = ?', (conversation_id,))
         row = cursor.fetchone()
         if not row:
@@ -114,7 +114,11 @@ class AgentMemory:
         
         new_id = self.create_conversation(fork_name)
         
-        cursor = self.conn.execute('SELECT role, content, image_path, timestamp FROM messages WHERE conversation_id = ? ORDER BY id ASC', (conversation_id,))
+        if up_to_message_id:
+            cursor = self.conn.execute('SELECT role, content, image_path, timestamp FROM messages WHERE conversation_id = ? AND id <= ? ORDER BY id ASC', (conversation_id, up_to_message_id))
+        else:
+            cursor = self.conn.execute('SELECT role, content, image_path, timestamp FROM messages WHERE conversation_id = ? ORDER BY id ASC', (conversation_id,))
+        
         messages = cursor.fetchall()
         for msg in messages:
             cursor = self.conn.execute('INSERT INTO messages (conversation_id, role, content, image_path, timestamp) VALUES (?, ?, ?, ?, ?)', (new_id, msg[0], msg[1], msg[2], msg[3]))
@@ -142,8 +146,16 @@ class AgentMemory:
         }
 
     def get_all_messages(self, conversation_id):
-        cursor = self.conn.execute('SELECT role, content, image_path FROM messages WHERE conversation_id = ? ORDER BY id ASC', (conversation_id,))
-        return [{"role": row[0], "content": row[1], "image_path": row[2]} for row in cursor.fetchall()]
+        cursor = self.conn.execute('SELECT id, role, content, image_path, timestamp FROM messages WHERE conversation_id = ? ORDER BY id ASC', (conversation_id,))
+        return [{"id": row[0], "role": row[1], "content": row[2], "image_path": row[3], "timestamp": row[4]} for row in cursor.fetchall()]
+
+    def delete_message(self, message_id):
+        self.conn.execute('DELETE FROM messages WHERE id = ?', (message_id,))
+        self.conn.commit()
+
+    def update_message(self, message_id, content):
+        self.conn.execute('UPDATE messages SET content = ? WHERE id = ?', (content, message_id))
+        self.conn.commit()
 
     def get_last_message(self, conversation_id):
         cursor = self.conn.execute(

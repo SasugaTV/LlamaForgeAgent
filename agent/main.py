@@ -13,7 +13,7 @@ from PIL import Image, ImageTk
 
 from memory import AgentMemory
 from llm_client import LlamaForgeClient
-from agent_commands import CommandStreamFilter, parse_commands
+from agent_commands import parse_commands
 
 class AgentApp(ctk.CTk):
     def __init__(self):
@@ -27,6 +27,9 @@ class AgentApp(ctk.CTk):
         # --- Settings ---
         self.max_context_window = 8192
         self.compression_threshold = self.max_context_window // 2
+        self.assistant_response_max_tokens = 1200
+        self.assistant_visible_token_limit = 360
+        self.assistant_reasoning_token_limit = 900
         self.system_prompt = self._load_system_prompt()
         self.current_conversation_id = None
         self.working_context = []
@@ -112,16 +115,11 @@ class AgentApp(ctk.CTk):
 
     def _self_management_instructions(self):
         return (
-            "\n--- SELF-MANAGEMENT TOOLS ---\n"
-            "You can quietly maintain your own state by embedding bracket commands anywhere "
-            "in your reply. They are stripped out before the user sees the reply.\n"
-            "Do not announce or explain when you use these tools; simply embed them if needed.\n\n"
-            "[[LOCATION: place]] - Record where the user currently is.\n"
-            "[[NOTE: text]] - Add a short-lived reminder to your notepad.\n"
-            "[[NOTE_DONE: text]] - Remove a handled reminder from your notepad.\n"
-            "[[REMEMBER: text]] - Save a durable fact to long-term memory.\n\n"
-            "If no tools are needed for the current turn, output your reply directly without hesitation. "
-            "Keep your internal reasoning brief and decisive.\n"
+            "\n--- INSTRUCTIONS ---\n"
+            "Focus purely on having a natural, helpful conversation with the user. "
+            "Prefer compact, direct replies with only the detail the user needs right now. "
+            "Your context is automatically managed by a background system, so you do not need to use "
+            "any special bracket commands or manage your own memory. Just be conversational.\n"
         )
 
     def _current_time_context(self):
@@ -184,6 +182,16 @@ class AgentApp(ctk.CTk):
             "This may be stale - if their messages suggest they've moved, update it. "
             "Let the setting shape relevant, organic suggestions when it genuinely fits."
         )
+
+    def _format_ui_timestamp(self, timestamp_str):
+        if not timestamp_str:
+            return datetime.now().strftime("%Y-%m-%d %H:%M")
+        try:
+            # Assuming SQLITE_TIMESTAMP_FORMAT is "%Y-%m-%d %H:%M:%S"
+            dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return str(timestamp_str)[:16]
 
     def _set_location(self, place):
         place = " ".join(str(place or "").split())
@@ -382,35 +390,90 @@ class AgentApp(ctk.CTk):
         # Input area
         self.input_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.input_frame.grid(row=3, column=0, sticky="ew")
-        self.input_frame.grid_columnconfigure(1, weight=1)
-
-        self.attach_btn = ctk.CTkButton(self.input_frame, text="📎 Image", width=60, command=self.attach_image)
-        self.attach_btn.grid(row=0, column=0, padx=(0, 10))
+        self.input_frame.grid_columnconfigure(0, weight=1)
 
         self.entry = ctk.CTkEntry(self.input_frame, placeholder_text="Type your message here...", font=("Segoe UI", self.chat_font_size))
-        self.entry.grid(row=0, column=1, sticky="ew", padx=(0, 10))
+        self.entry.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         self.entry.bind("<Return>", lambda event: self.send_message())
 
-        self.send_button = ctk.CTkButton(self.input_frame, text="Send", width=80, command=self.send_message)
-        self.send_button.grid(row=0, column=2)
+        self.button_frame = ctk.CTkFrame(self.input_frame, fg_color="transparent")
+        self.button_frame.grid(row=1, column=0, sticky="ew")
+
+        self.attach_btn = ctk.CTkButton(self.button_frame, text="📎 Image", width=60, command=self.attach_image)
+        self.attach_btn.pack(side="left", padx=(0, 10))
+
+        self.send_button = ctk.CTkButton(self.button_frame, text="Send", width=80, command=self.send_message)
+        self.send_button.pack(side="left", padx=(0, 10))
 
         self.repost_button = ctk.CTkButton(
-            self.input_frame,
+            self.button_frame,
             text="Repost Last",
             width=90,
             state="disabled",
             command=self.repost_last_message
         )
-        self.repost_button.grid(row=0, column=3, padx=(10, 0))
+        self.repost_button.pack(side="left", padx=(0, 10))
 
-        self.scroll_bottom_btn = ctk.CTkButton(self.input_frame, text="↓ Bottom", width=60, command=self.scroll_to_bottom)
-        self.scroll_bottom_btn.grid(row=0, column=4, padx=(10, 0))
+        self.scroll_bottom_btn = ctk.CTkButton(self.button_frame, text="↓ Bottom", width=60, command=self.scroll_to_bottom)
+        self.scroll_bottom_btn.pack(side="left", padx=(0, 10))
 
-        self.image_preview_label = ctk.CTkLabel(self.input_frame, text="", text_color="green")
-        self.image_preview_label.grid(row=1, column=1, sticky="w", pady=(5,0))
+        self.status_frame = ctk.CTkFrame(self.input_frame, fg_color="transparent")
+        self.status_frame.grid(row=2, column=0, sticky="ew")
+        self.status_frame.grid_columnconfigure(1, weight=1)
 
-        self.queue_status_label = ctk.CTkLabel(self.input_frame, text="", text_color="gray50")
-        self.queue_status_label.grid(row=1, column=2, columnspan=3, sticky="e", pady=(5,0))
+        self.image_preview_label = ctk.CTkLabel(self.status_frame, text="", text_color="green")
+        self.image_preview_label.grid(row=0, column=0, sticky="w", pady=(5,0))
+
+        self.queue_status_label = ctk.CTkLabel(self.status_frame, text="", text_color="gray50")
+        self.queue_status_label.grid(row=0, column=1, sticky="e", pady=(5,0))
+
+    def delete_message_by_id(self, msg_id):
+        if messagebox.askyesno("Delete Message", "Delete this message from history?"):
+            self.memory.delete_message(msg_id)
+            if self.current_conversation_id:
+                self.load_conversation(self.current_conversation_id)
+
+    def fork_from_message_by_id(self, msg_id):
+        if messagebox.askyesno("Fork Conversation", "Create a new conversation branching from this message?"):
+            new_id = self.memory.fork_conversation(self.current_conversation_id, up_to_message_id=msg_id)
+            if new_id:
+                self.load_conversation(new_id)
+
+    def _ui_insert_message_controls(self, msg_id):
+        if msg_id is None:
+            return
+            
+        self.chat_display.configure(state="normal")
+        
+        fork_btn = ctk.CTkButton(
+            self.chat_display,
+            text="🔀",
+            width=20,
+            height=20,
+            fg_color="transparent",
+            text_color="#8AB4F8",
+            hover_color="#333333",
+            font=ctk.CTkFont(size=max(10, self.chat_font_size - 2)),
+            command=lambda mid=msg_id: self.fork_from_message_by_id(mid)
+        )
+        self.chat_display._textbox.window_create("end", window=fork_btn)
+        self.chat_display.insert("end", " ")
+        
+        del_btn = ctk.CTkButton(
+            self.chat_display,
+            text="🗑️",
+            width=20,
+            height=20,
+            fg_color="transparent",
+            text_color="#F28B82",
+            hover_color="#333333",
+            font=ctk.CTkFont(size=max(10, self.chat_font_size - 2)),
+            command=lambda mid=msg_id: self.delete_message_by_id(mid)
+        )
+        self.chat_display._textbox.window_create("end", window=del_btn)
+        self.chat_display.insert("end", " ")
+        
+        self.chat_display.configure(state="disabled")
 
     def load_conversations_list(self):
         for widget in self.conv_list_frame.winfo_children():
@@ -469,30 +532,52 @@ class AgentApp(ctk.CTk):
 
         history = self.memory.get_all_messages(conv_id)
         
-        # Rebuild working context and display
+        # --- TWO STREAMS: Load the agent's compressed context if it exists ---
+        agent_context_loaded = False
+        context_file = os.path.join(self.data_dir, f"agent_context_{conv_id}.json")
+        if os.path.exists(context_file):
+            try:
+                with open(context_file, "r", encoding="utf-8") as f:
+                    saved_context = json.load(f)
+                    if saved_context:
+                        self.working_context = saved_context
+                        # Refresh the system prompt in case the user edited SOUL.md / USER.md
+                        if self.working_context[0].get("role") == "system":
+                            self.working_context[0]["content"] = self.system_prompt
+                        agent_context_loaded = True
+            except Exception as e:
+                print(f"Failed to load agent context from json: {e}")
+
+        # Rebuild display (and fallback context if needed)
         for msg in history:
             role = msg["role"]
             text_content = msg["content"]
             img_path = msg.get("image_path")
+            msg_id = msg.get("id")
+            timestamp_str = msg.get("timestamp")
+            display_time = self._format_ui_timestamp(timestamp_str)
             
             tag = "user_text" if role == "user" else "agent_text"
-            role_label = "You" if role == "user" else "Agent"
+            role_label = f"[{display_time}] You" if role == "user" else f"[{display_time}] Agent"
             
             if img_path and os.path.exists(img_path):
                 self.append_to_display(f"{role_label}: ", tag)
+                self._ui_insert_message_controls(msg_id)
                 self.insert_image_to_display(img_path)
                 self.append_to_display(f"\n{text_content}\n\n")
                 
-                with open(img_path, "rb") as img_file:
-                    base64_img = base64.b64encode(img_file.read()).decode('utf-8')
-                
-                content_arr = [
-                    {"type": "text", "text": text_content},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-                ]
-                self.working_context.append({"role": role, "content": content_arr})
+                if not agent_context_loaded:
+                    with open(img_path, "rb") as img_file:
+                        base64_img = base64.b64encode(img_file.read()).decode('utf-8')
+                    
+                    content_arr = [
+                        {"type": "text", "text": text_content},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+                    ]
+                    self.working_context.append({"role": role, "content": content_arr})
             else:
                 self.append_to_display(f"{role_label}: ", tag)
+                self._ui_insert_message_controls(msg_id)
                 
                 if role == "assistant":
                     reasoning_text, text_content = self._split_reasoning_text(text_content)
@@ -511,7 +596,8 @@ class AgentApp(ctk.CTk):
                         self.append_to_display(" ")
 
                 self.append_to_display(f"{text_content}\n\n")
-                self.working_context.append({"role": role, "content": msg["content"]})
+                if not agent_context_loaded:
+                    self.working_context.append({"role": role, "content": msg["content"]})
         self._update_repost_button_state()
                 
     def rename_current_conversation(self):
@@ -859,13 +945,87 @@ finally {
     def _format_token_count(self, count):
         return f"{max(0, int(count)):,}"
 
+    def _count_single_message_tokens(self, message):
+        return (
+            self.llm.count_tokens(message.get("role", ""))
+            + self.llm.count_tokens(message.get("content", ""))
+            + 4
+        )
+
     def _count_message_tokens(self, messages):
-        total = 0
+        return sum(self._count_single_message_tokens(message) for message in messages)
+
+    def _context_metrics(self, messages=None):
+        messages = self.working_context if messages is None else messages
+        by_role = {}
+        image_count = 0
         for message in messages:
-            total += self.llm.count_tokens(message.get("role", ""))
-            total += self.llm.count_tokens(message.get("content", ""))
-            total += 4
-        return total
+            role = message.get("role", "unknown")
+            by_role[role] = by_role.get(role, 0) + 1
+            content = message.get("content", "")
+            if isinstance(content, list):
+                image_count += sum(1 for part in content if part.get("type") == "image_url")
+        return {
+            "tokens": self._count_message_tokens(messages),
+            "messages": len(messages),
+            "by_role": by_role,
+            "images": image_count,
+        }
+
+    def _format_context_metrics(self, metrics):
+        role_parts = [
+            f"{role}={metrics['by_role'][role]}"
+            for role in sorted(metrics["by_role"])
+        ]
+        role_text = ", ".join(role_parts) if role_parts else "no messages"
+        image_text = f", images={metrics['images']}" if metrics["images"] else ""
+        return (
+            f"{self._format_token_count(metrics['tokens'])} est. tokens, "
+            f"{metrics['messages']} messages ({role_text}{image_text})"
+        )
+
+    def _format_context_window_pct(self, tokens):
+        if self.max_context_window <= 0:
+            return "unknown"
+        return f"{(tokens / self.max_context_window) * 100:.1f}%"
+
+    def _format_token_delta(self, before_tokens, after_tokens):
+        saved_tokens = before_tokens - after_tokens
+        pct = (saved_tokens / before_tokens) * 100 if before_tokens else 0
+        amount = self._format_token_count(abs(saved_tokens))
+        if saved_tokens >= 0:
+            return f"{amount} est. tokens saved ({abs(pct):.1f}%)"
+        return f"grew by {amount} est. tokens ({abs(pct):.1f}%)"
+
+    def _compression_summary_budget(self, chunk_tokens):
+        return max(40, min(self.llm.summary_max_tokens, int(chunk_tokens * 0.45)))
+
+    def _limit_visible_reply_to_budget(self, text):
+        if self.llm.count_tokens(text) <= self.assistant_visible_token_limit:
+            return text, False
+
+        max_chars = max(120, int(self.assistant_visible_token_limit * 2.5))
+        candidate = str(text)[:max_chars].rstrip()
+        min_boundary = max(80, int(max_chars * 0.55))
+
+        sentence_matches = list(re.finditer(r"[.!?](?:\s|$)", candidate))
+        if sentence_matches and sentence_matches[-1].end() >= min_boundary:
+            return candidate[:sentence_matches[-1].end()].rstrip(), True
+
+        paragraph_boundary = candidate.rfind("\n\n")
+        if paragraph_boundary >= min_boundary:
+            return candidate[:paragraph_boundary].rstrip(), True
+
+        word_boundary = candidate.rfind(" ")
+        if word_boundary >= min_boundary:
+            return candidate[:word_boundary].rstrip(), True
+
+        return candidate, True
+
+    def _close_response_stream(self, response_stream):
+        close_stream = getattr(response_stream, "close", None)
+        if callable(close_stream):
+            close_stream()
 
     def _set_llamaforge_status(
         self,
@@ -1006,19 +1166,132 @@ finally {
             return out
         return [m for i, m in enumerate(out) if m["role"] == "system" or i >= first_user]
 
-    def manage_context(self):
-        current_tokens = sum(self.llm.count_tokens(m["content"]) for m in self.working_context)
-        if current_tokens > self.compression_threshold:
-            print(f"Context window exceeded threshold ({current_tokens} > {self.compression_threshold}). Compressing...")
-            if len(self.working_context) > 5:
-                messages_to_compress = self.working_context[1:-4]
-                recent_messages = self.working_context[-4:]
-                summary = self.llm.summarize_messages(messages_to_compress)
-                self.working_context = [
-                    self.working_context[0],
-                    {"role": "system", "content": f"Summary of earlier conversation: {summary}"}
-                ] + recent_messages
-                print("Context compressed successfully.")
+    def manage_context(self, phase="context check", report_if_under_threshold=False):
+        initial_metrics = self._context_metrics()
+        initial_tokens = initial_metrics["tokens"]
+        label = f"[Context compression: {phase}]"
+
+        if initial_tokens <= self.compression_threshold:
+            if report_if_under_threshold:
+                print(
+                    f"{label} no compression needed: "
+                    f"{self._format_context_metrics(initial_metrics)}; "
+                    f"window={self._format_context_window_pct(initial_tokens)} of "
+                    f"{self._format_token_count(self.max_context_window)}, "
+                    f"threshold={self._format_token_count(self.compression_threshold)}."
+                )
+            return
+
+        print(
+            f"{label} starting: {self._format_context_metrics(initial_metrics)}; "
+            f"window={self._format_context_window_pct(initial_tokens)} of "
+            f"{self._format_token_count(self.max_context_window)}, "
+            f"threshold={self._format_token_count(self.compression_threshold)}."
+        )
+
+        step = 0
+        while self._count_message_tokens(self.working_context) > self.compression_threshold:
+            if len(self.working_context) <= 5:
+                current_metrics = self._context_metrics()
+                print(
+                    f"{label} halted: {self._format_context_metrics(current_metrics)} "
+                    "is over threshold, but there are too few messages to safely compress."
+                )
+                break
+
+            step += 1
+            system_prompt = self.working_context[0]
+            recent_messages = self.working_context[-4:]
+            middle_messages = self.working_context[1:-4]
+            
+            if not middle_messages:
+                print(f"{label} halted: no older middle messages are available to compress.")
+                break
+                
+            # Take a "bite" from the start of the middle messages (up to 5 at a time)
+            chunk_size = min(5, len(middle_messages))
+            chunk_to_compress = middle_messages[:chunk_size]
+            remaining_middle = middle_messages[chunk_size:]
+            before_step_metrics = self._context_metrics()
+            chunk_metrics = self._context_metrics(chunk_to_compress)
+
+            print(
+                f"{label} step {step}: compressing {chunk_size} oldest middle messages "
+                f"({self._format_context_metrics(chunk_metrics)}); "
+                f"keeping {len(recent_messages)} recent messages unchanged."
+            )
+            
+            summary_budget = self._compression_summary_budget(chunk_metrics["tokens"])
+            print(
+                f"{label} step {step}: requesting summary budget of "
+                f"{self._format_token_count(summary_budget)} est. tokens."
+            )
+            summary = self.llm.summarize_messages(
+                chunk_to_compress,
+                max_tokens=summary_budget,
+            )
+            
+            if summary == "Failed to summarize.":
+                print(f"{label} step {step} failed: summarization failed; halting compression.")
+                break
+                
+            new_summary_msg = {"role": "system", "content": f"Summary of earlier conversation: {summary}"}
+            self.working_context = [system_prompt, new_summary_msg] + remaining_middle + recent_messages
+            after_step_metrics = self._context_metrics()
+            if after_step_metrics["tokens"] >= before_step_metrics["tokens"]:
+                tighter_budget = max(40, min(summary_budget, int(chunk_metrics["tokens"] * 0.25)))
+                print(
+                    f"{label} step {step}: model summary did not reduce context "
+                    f"({self._format_token_count(before_step_metrics['tokens'])} -> "
+                    f"{self._format_token_count(after_step_metrics['tokens'])}); "
+                    f"trimming it to {self._format_token_count(tighter_budget)} est. tokens."
+                )
+                summary = self.llm._trim_text_to_token_budget(summary, tighter_budget)
+                new_summary_msg = {"role": "system", "content": f"Summary of earlier conversation: {summary}"}
+                self.working_context = [system_prompt, new_summary_msg] + remaining_middle + recent_messages
+                after_step_metrics = self._context_metrics()
+
+                if after_step_metrics["tokens"] >= before_step_metrics["tokens"]:
+                    self.working_context = [system_prompt] + middle_messages + recent_messages
+                    print(
+                        f"{label} step {step} halted: summary would make context larger, "
+                        "so the original context was kept."
+                    )
+                    break
+
+            print(
+                f"{label} step {step} done: "
+                f"{self._format_token_count(before_step_metrics['tokens'])} -> "
+                f"{self._format_token_count(after_step_metrics['tokens'])} est. tokens; "
+                f"{self._format_token_delta(before_step_metrics['tokens'], after_step_metrics['tokens'])}; "
+                f"messages {before_step_metrics['messages']} -> {after_step_metrics['messages']}."
+            )
+            
+            # --- DREAM STATE: Save the compressed summary to long-term memory ---
+            print(f"{label} step {step}: consolidating summary into vector memory...")
+            try:
+                emb = self.llm.get_embedding(summary)
+                if emb:
+                    # Provide a dummy metadata dict that matches memory expectations
+                    self.memory.add_to_vector_memory(
+                        summary,
+                        {"role": "system", "memory_type": "dream_summary", "id": -1},
+                        emb
+                    )
+                    self.after(0, self.update_memory_count_display)
+            except Exception as e:
+                print(f"Failed to embed dream state summary: {e}")
+
+        final_metrics = self._context_metrics()
+        print(
+            f"{label} complete: "
+            f"{self._format_token_count(initial_tokens)} -> "
+            f"{self._format_token_count(final_metrics['tokens'])} est. tokens; "
+            f"{self._format_token_delta(initial_tokens, final_metrics['tokens'])}; "
+            f"window={self._format_context_window_pct(final_metrics['tokens'])} of "
+            f"{self._format_token_count(self.max_context_window)}, "
+            f"messages {initial_metrics['messages']} -> {final_metrics['messages']}."
+        )
 
     def _detect_loop(self, text):
         if not text or len(text) < 60:
@@ -1048,8 +1321,12 @@ finally {
             self.after(0, self._start_llamaforge_request_status)
 
             user_msg_id = None
+            display_time = datetime.now().strftime("%Y-%m-%d %H:%M")
             if not repost_existing:
-                self.after(0, lambda: self.append_to_display("You: ", "user_text"))
+                user_msg_id = self.memory.add_message_to_sqlite(self.current_conversation_id, "user", user_text, img_path)
+                
+                self.after(0, lambda dt=display_time: self.append_to_display(f"[{dt}] You: ", "user_text"))
+                self.after(0, lambda uid=user_msg_id: self._ui_insert_message_controls(uid))
                 
                 if img_path:
                     self.after(0, lambda p=img_path: self.insert_image_to_display(p))
@@ -1066,7 +1343,6 @@ finally {
                     self.after(0, lambda: self.append_to_display(f"{user_text}\n\n"))
                     content_for_llm = user_text
                 
-                user_msg_id = self.memory.add_message_to_sqlite(self.current_conversation_id, "user", user_text, img_path)
                 self.working_context.append({"role": "user", "content": content_for_llm})
                 
                 self.after(0, self.load_conversations_list) # Update sidebar timestamps
@@ -1089,10 +1365,12 @@ finally {
                     )
                     self.after(0, self.update_memory_count_display)
 
-            self.manage_context()
+            self.manage_context(phase="pre-response safety check")
             
-            max_attempts = 2
+            max_attempts = 1
             attempt = 0
+            
+            ai_msg_id = None
             
             while attempt < max_attempts:
                 attempt += 1
@@ -1132,13 +1410,21 @@ finally {
                 if attempt > 1:
                     query_context.append({
                         "role": "system",
-                        "content": "SYSTEM WARNING: Your previous attempt to answer was terminated because you entered an infinite repetition loop. You must break out of your previous thought pattern. Do not repeat phrases. Provide a direct, concise answer."
+                        "content": "SYSTEM WARNING: Your previous attempt got stuck in hidden reasoning or repetition. Do not plan, announce intentions, or restate the task. Give the direct answer now in a compact reply."
                     })
                     print("[Loop Detected! Restarting Generation...]")
-                else:
-                    def start_agent_msg():
-                        self.append_to_display("Agent: ", "agent_text")
-                    self.after(0, start_agent_msg)
+                    
+                if ai_msg_id is None:
+                    ai_msg_id = self.memory.add_message_to_sqlite(self.current_conversation_id, "assistant", "", None)
+                
+                def start_agent_msg(a_msg_id, is_recovery=False):
+                    dt = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    self.append_to_display(f"[{dt}] Agent: ", "agent_text")
+                    self._ui_insert_message_controls(a_msg_id)
+                    if is_recovery:
+                        self.append_to_display("[Recovering from loop...]\n")
+                
+                self.after(0, lambda a_id=ai_msg_id, recovering=attempt > 1: start_agent_msg(a_id, recovering))
                 
                 query_context = self._sanitize_messages(query_context)
                 prompt_tokens = self._count_message_tokens(query_context)
@@ -1153,13 +1439,23 @@ finally {
                         tokens_down=0,
                     )
                 )
-                response_stream = self.llm.get_chat_response(query_context, stream=True)
+                print(
+                    "[Response budget] "
+                    f"completion cap={self._format_token_count(self.assistant_response_max_tokens)} tokens; "
+                    f"visible cap={self._format_token_count(self.assistant_visible_token_limit)} tokens; "
+                    f"silent reasoning cap="
+                    f"{self._format_token_count(self.assistant_reasoning_token_limit) if self.assistant_reasoning_token_limit else 'disabled'}."
+                )
+                response_stream = self.llm.get_chat_response(
+                    query_context,
+                    stream=True,
+                    max_tokens=self.assistant_response_max_tokens,
+                )
                 self.after(0, lambda: self._set_llamaforge_status(tokens_up_active=False))
                 
                 full_response = ""
                 clean_response = ""
                 full_reasoning = ""
-                command_filter = CommandStreamFilter()
                 in_reasoning = False
                 current_block_id = None
                 reasoning_speech_id = None
@@ -1167,6 +1463,8 @@ finally {
                 final_button_inserted = False
                 stream_started = False
                 loop_detected = False
+                response_limited = False
+                reasoning_budget_exceeded = False
                 
                 if response_stream:
                     self.cancel_inference_flag = False
@@ -1211,6 +1509,21 @@ finally {
                                 self._set_tts_payload(reasoning_speech_id, full_reasoning)
                             self.after(0, lambda b=current_block_id, t=reasoning: self._ui_append_reasoning(b, t))
 
+                            reasoning_tokens = self.llm.count_tokens(full_reasoning)
+                            if (
+                                self.assistant_reasoning_token_limit
+                                and not clean_response
+                                and reasoning_tokens > self.assistant_reasoning_token_limit
+                            ):
+                                reasoning_budget_exceeded = True
+                                loop_detected = True
+                                print(
+                                    "[Response budget] Silent reasoning exceeded "
+                                    f"{self._format_token_count(self.assistant_reasoning_token_limit)} tokens; stopping."
+                                )
+                                self._close_response_stream(response_stream)
+                                break
+
                         if content:
                             if in_reasoning:
                                 in_reasoning = False
@@ -1222,11 +1535,25 @@ finally {
                                 self.after(0, lambda: self.append_to_display(" "))
 
                             full_response += content
-                            visible = command_filter.feed(content)
-                            if visible:
-                                clean_response += visible
-                                self._set_tts_payload(final_speech_id, clean_response)
-                                self.after(0, lambda text=visible: self.append_to_display(text))
+                            previous_clean_response = clean_response
+                            limited_response, response_limited = self._limit_visible_reply_to_budget(
+                                clean_response + content
+                            )
+                            if len(limited_response) < len(previous_clean_response):
+                                limited_response = previous_clean_response
+
+                            visible_content = limited_response[len(previous_clean_response):]
+                            clean_response = limited_response
+                            self._set_tts_payload(final_speech_id, clean_response)
+                            if visible_content:
+                                self.after(0, lambda text=visible_content: self.append_to_display(text))
+                            if response_limited:
+                                print(
+                                    "[Response budget] Visible reply capped at "
+                                    f"{self._format_token_count(self.assistant_visible_token_limit)} tokens."
+                                )
+                                self._close_response_stream(response_stream)
+                                break
 
                         if reasoning or content:
                             output_tokens = self.llm.count_tokens(full_reasoning) + self.llm.count_tokens(full_response)
@@ -1241,6 +1568,8 @@ finally {
                         
                         if self._detect_loop(full_reasoning) or self._detect_loop(full_response):
                             loop_detected = True
+                            print("[Loop Detected! Stopping current generation.]")
+                            self._close_response_stream(response_stream)
                             break
                 else:
                     self.after(0, lambda: self.append_to_display("[Error: response_stream is None. Connection failed.]"))
@@ -1251,35 +1580,50 @@ finally {
                     if attempt < max_attempts:
                         continue
                     else:
-                        print("[Loop Detected! Max recoveries reached.]")
+                        full_reasoning = ""
+                        if reasoning_budget_exceeded:
+                            print("[Response budget] Hidden reasoning overrun; stopped generation.")
+                            if not clean_response:
+                                clean_response = (
+                                    "I got stuck in hidden thinking, so I stopped this response before it tied up the chat."
+                                )
+                                self.after(0, lambda text=clean_response: self.append_to_display(text))
+                        else:
+                            print("[Loop Detected!] Stopped current generation.")
+                            if not clean_response:
+                                clean_response = (
+                                    "I got caught in a repetition loop, so I stopped that response."
+                                )
+                                self.after(0, lambda text=clean_response: self.append_to_display(text))
 
                 break
 
-            # Release any text the command filter was holding back.
-            tail = command_filter.flush()
-            if tail:
-                clean_response += tail
-                self.after(0, lambda text=tail: self.append_to_display(text))
-
-            # Authoritatively extract the agent's self-management commands and
-            # apply them; store/speak only the user-facing (cleaned) reply.
-            final_clean, agent_cmds = parse_commands(full_response)
-            if agent_cmds:
-                self._apply_agent_commands(agent_cmds)
+            if full_reasoning and not clean_response:
+                print("[Response budget] Model produced hidden reasoning but no visible answer.")
+                full_reasoning = ""
+                clean_response = (
+                    "I started thinking through that without landing the answer. "
+                    "Ask me again and I will answer directly."
+                )
+                self.after(0, lambda text=clean_response: self.append_to_display(text))
 
             self.after(0, self._finish_llamaforge_request_status)
             self.after(0, lambda: self.append_to_display("\n\n"))
             if full_reasoning and reasoning_speech_id:
                 self.after(0, lambda sid=reasoning_speech_id, text=full_reasoning: self._set_tts_payload(sid, text))
-            if final_clean:
-                self.after(0, lambda sid=final_speech_id, text=final_clean: self._finalize_final_tts(sid, text))
+            if clean_response:
+                self.after(0, lambda sid=final_speech_id, text=clean_response: self._finalize_final_tts(sid, text))
 
-            if final_clean or full_reasoning:
-                db_content = final_clean
+            if clean_response or full_reasoning:
+                db_content = clean_response
                 if full_reasoning:
-                    db_content = f"<think>\n{full_reasoning}\n</think>\n{final_clean}"
+                    db_content = f"<think>\n{full_reasoning}\n</think>\n{clean_response}"
 
-                ai_msg_id = self.memory.add_message_to_sqlite(self.current_conversation_id, "assistant", db_content, None)
+                if ai_msg_id is not None:
+                    self.memory.update_message(ai_msg_id, db_content)
+                else:
+                    ai_msg_id = self.memory.add_message_to_sqlite(self.current_conversation_id, "assistant", db_content, None)
+                    
                 self.working_context.append({"role": "assistant", "content": db_content})
                 ai_emb = self.llm.get_embedding(db_content)
                 if ai_emb:
@@ -1290,6 +1634,15 @@ finally {
                     )
                     self.after(0, self.update_memory_count_display)
 
+            # Compress the context AFTER the agent responds to avoid delaying the UI
+            self.manage_context(phase="post-response", report_if_under_threshold=True)
+            
+            # Save the agent's (potentially newly compressed) state to disk
+            self._save_agent_context()
+
+            # Trigger background memory agent
+            self._trigger_background_memory_agent()
+
         except Exception as e:
             error_msg = f"\n[CRITICAL THREAD ERROR]: {str(e)}\n\n"
             self.after(0, lambda: self.append_to_display(error_msg))
@@ -1298,6 +1651,85 @@ finally {
         finally:
             self.after(0, self._finish_llamaforge_request_status)
             self.after(0, self._finish_message_processing)
+
+    def _save_agent_context(self):
+        if not self.current_conversation_id:
+            return
+        path = os.path.join(self.data_dir, f"agent_context_{self.current_conversation_id}.json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.working_context, f)
+        except Exception as e:
+            print(f"Failed to save agent context: {e}")
+
+    def _trigger_background_memory_agent(self):
+        # We need the last user message and the agent's final clean response
+        recent = self.working_context[-2:] if len(self.working_context) >= 2 else []
+        if not recent or recent[-1]["role"] != "assistant":
+            return
+        
+        # Make a copy of the content to safely pass to the thread
+        conversation_slice = list(recent)
+        
+        threading.Thread(
+            target=self._background_memory_task,
+            args=(conversation_slice,),
+            daemon=True
+        ).start()
+
+    def _background_memory_task(self, conversation_slice):
+        try:
+            # Build a localized context for the memory agent
+            sys_prompt = (
+                "You are an invisible background memory manager. Your sole job is to read the latest exchange "
+                "and update the user's notepad and location. "
+                "You MUST use EXACTLY DOUBLE BRACKETS for your commands. Example: [[NOTE_DONE: task]]\n"
+                "Available Commands:\n"
+                "[[LOCATION: place]] - Record where the user currently is.\n"
+                "[[NOTE: text]] - Add a short-lived reminder to your notepad.\n"
+                "[[NOTE_DONE: text]] - Remove a handled reminder from your notepad (match the text closely).\n"
+                "[[REMEMBER: text]] - Save a durable fact to long-term memory.\n"
+                "Do not write conversational text. Just output the necessary commands, or nothing if no updates are needed."
+            )
+            
+            # Reconstruct the current notes so the agent knows what to delete
+            current_notes = self._load_notepad_context()
+            if current_notes:
+                sys_prompt += f"\n\nCURRENT NOTEPAD:\n{current_notes}"
+                
+            query_context = [{"role": "system", "content": sys_prompt}]
+            query_context.extend(conversation_slice)
+
+            # Let's count tokens strictly to ensure we don't blow up
+            prompt_tokens = self._count_message_tokens(query_context)
+            # Run inference synchronously in this background thread
+            response_stream = self.llm.get_chat_response(query_context, stream=True, max_tokens=200)
+            
+            if not response_stream:
+                return
+                
+            full_response = ""
+            full_reasoning = ""
+            for chunk in response_stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                reasoning = getattr(delta, "reasoning_content", None) or getattr(getattr(delta, "model_extra", {}), "reasoning_content", "") or ""
+                content = getattr(delta, "content", None) or ""
+                full_reasoning += reasoning
+                full_response += content
+                
+            combined_text = full_response + "\n" + full_reasoning
+            print(f"\n--- Background Agent Output ---\n{combined_text.strip()}\n-------------------------------")
+            
+            # The background agent writes raw commands. Parse them!
+            _, agent_cmds = parse_commands(combined_text)
+            if agent_cmds:
+                print(f"Executing Background Commands: {agent_cmds}")
+                self._apply_agent_commands(agent_cmds)
+                
+        except Exception as e:
+            print(f"Background memory agent failed: {e}")
 
     def _update_queue_status(self):
         queued_count = len(self.message_queue)
